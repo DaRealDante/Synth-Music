@@ -20,6 +20,7 @@ class Player(QObject):
     volumeChanged = Signal(int, bool)
     playbackError = Signal(str)
     songStarted = Signal(int)
+    effectsApplied = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -37,6 +38,7 @@ class Player(QObject):
         self.stopAfterCurrent = False
         self.pendingSeek = None
         self.consecutiveErrors = 0
+        self.effectsProvider = None
 
         self.loopTimer = QTimer(self)
         self.loopTimer.setInterval(15)
@@ -181,6 +183,11 @@ class Player(QObject):
                     QTimer.singleShot(50, self.next)
             return
         self.pendingSeek = startPosition if startPosition > 0 else None
+        if self.effectsProvider is not None:
+            effects = self.effectsProvider(song)
+            self.mediaPlayer.presetRate(effects["rate"], effects["keepPitch"])
+            self.mediaPlayer.setReverb(effects["reverbWet"], effects["reverbSize"])
+            self.effectsApplied.emit(effects)
         self.mediaPlayer.setSource(QUrl.fromLocalFile(os.path.abspath(song["path"])))
         self.songChanged.emit(song)
         if autoplay:
@@ -263,10 +270,13 @@ class Player(QObject):
         self.audioOutput.setMuted(muted)
         self.volumeChanged.emit(self.volume, self.muted)
 
-    def setPlaybackRate(self, rate):
-        self.mediaPlayer.setPlaybackRate(rate)
+    def setPlaybackRate(self, rate, keepPitch=None):
+        self.mediaPlayer.setPlaybackRate(rate, keepPitch)
         if self.activeLoop:
             self.mediaPlayer.setLoopRange(self.activeLoop["startMs"], self.activeLoop["endMs"])
+
+    def setReverb(self, wet, decaySeconds):
+        self.mediaPlayer.setReverb(wet, decaySeconds)
 
     def setEqualizer(self, gains, preampDb, enabled):
         self.mediaPlayer.setEqualizer(gains, preampDb, enabled)

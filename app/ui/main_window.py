@@ -23,6 +23,7 @@ from . import theme
 from .equalizer_page import EqualizerPage
 from .dialogs import CutDialog, LyricsEditDialog, LyricsSearchDialog, PlaylistDialog, SettingsDialog, SongEditDialog, VideoSearchDialog
 from .now_playing_view import NowPlayingView
+from .effects_popup import DEFAULT_EFFECTS, EffectsPopup
 from .video_controller import BackdropWidget, VideoController
 from .now_playing import NowPlayingPanel
 from .player_bar import PlayerBar
@@ -193,6 +194,12 @@ class MainWindow(QMainWindow):
         self.playerBar.openEqualizer.connect(lambda: self.navigate("equalizer"))
         self.playerBar.openNowPlaying.connect(lambda: self.navigate("nowplaying"))
         self.playerBar.ambientModeChosen.connect(self.setAmbientMode)
+        self.effectsPopup = EffectsPopup(self)
+        self.effectsPopup.effectsChanged.connect(self._onEffectsChanged)
+        self.effectsPopup.exportRequested.connect(self.exportWithEffects)
+        self.playerBar.effectsRequested.connect(self.showEffects)
+        self.player.effectsProvider = self.songEffects
+        self.player.effectsApplied.connect(self.playerBar.setEffectsIndicator)
         self.playerBar.openLyrics.connect(self.toggleLyricsView)
         self.playerBar.lyricsMenu.aboutToShow.connect(self._fillLyricsMenu)
         if settings.get("ambientMode") not in ("off", "background", "fullscreen"):
@@ -727,6 +734,80 @@ class MainWindow(QMainWindow):
         if self.pages.currentWidget() is not self.searchPage:
             self.refreshCurrentPage()
         self.showStatus(f"Scaricato: {result['title']}")
+
+    # ---------- speed / pitch / reverb (per song) ----------
+    def songEffects(self, song):
+        fresh = self.database.getSong(song["id"]) if song and song.get("id") else None
+        if not fresh:
+            return dict(DEFAULT_EFFECTS)
+        return {
+            "rate": float(fresh.get("songRate") or 1.0),
+            "keepPitch": bool(fresh.get("keepPitch", 1) if fresh.get("keepPitch") is not None else 1),
+            "reverbWet": float(fresh.get("reverbWet") or 0.0),
+            "reverbSize": float(fresh.get("reverbSize") or 1.8),
+        }
+
+    def showEffects(self):
+        current = self.player.currentSong()
+        if not current:
+            self.showStatus("Avvia prima una canzone")
+            return
+        self.effectsPopup.setSong(current, self.songEffects(current))
+        self.effectsPopup.showBelow(self.playerBar.speedButton)
+
+    def _onEffectsChanged(self, effects):
+        current = self.player.currentSong()
+        if not current:
+            return
+        self.database.updateSong(current["id"], songRate=effects["rate"], keepPitch=1 if effects["keepPitch"] else 0,
+                                 reverbWet=effects["reverbWet"], reverbSize=effects["reverbSize"])
+        self.player.setPlaybackRate(effects["rate"], effects["keepPitch"])
+        self.player.setReverb(effects["reverbWet"], effects["reverbSize"])
+        self.playerBar.setEffectsIndicator(effects)
+
+    def exportWithEffects(self):
+        current = self.player.currentSong()
+        if not current:
+            return
+        song = self.database.getSong(current["id"])
+        effects = self.songEffects(song)
+        if abs(effects["rate"] - 1.0) < 0.005 and effects["reverbWet"] < 0.005:
+            self.showStatus("Imposta prima una velocità o il reverb")
+            return
+        self.effectsPopup.hide()
+        tags = [f"{effects['rate']:.2f}x"] if abs(effects["rate"] - 1.0) >= 0.005 else []
+        if effects["reverbWet"] >= 0.005:
+            tags.append("reverb")
+        if effects["rate"] < 1 and effects["reverbWet"] >= 0.005:
+            tags = ["slowed + reverb"]
+        newTitle, accepted = QInputDialog.getText(self, "Salva come nuova canzone", "Nome:",
+                                                  text=f"{song.get('title')} ({' '.join(tags)})")
+        if not accepted or not newTitle.strip():
+            return
+        newTitle = newTitle.strip()
+        baseName = audio_tools.safeFileName(f"{song.get('artist')} - {newTitle}" if song.get("artist") else newTitle)
+        outputPath = audio_tools.uniquePath(settings.musicDir(), baseName, ".mp3")
+        self.showStatus("Creo la nuova canzone...", 60000)
+
+        def onFinished(path):
+            metadata.writeMp3Tags(path, newTitle, song.get("artist") or "", song.get("album") or "", song.get("cover"))
+            duration = metadata.readTags(path)["duration"]
+            newId = self.database.addSong(path, newTitle, song.get("artist") or "", song.get("album") or "",
+                                          duration, song.get("cover"), "cut", song.get("url"))
+            fields = {}
+            if song.get("syncedLyrics") and abs(effects["rate"] - 1.0) >= 0.005:
+                synced = lyrics.scaleSynced(song["syncedLyrics"], effects["rate"])
+                fields = {"syncedLyrics": synced, "lyrics": lyrics.plainFromSynced(synced), "lyricsChecked": 1}
+            elif song.get("lyrics") or song.get("syncedLyrics"):
+                fields = {"syncedLyrics": song.get("syncedLyrics"), "lyrics": song.get("lyrics"), "lyricsChecked": 1}
+            if fields:
+                self.database.updateSong(newId, **fields)
+            self.refreshCurrentPage()
+            self.showStatus(f"Creato \"{newTitle}\" nella libreria", 4000)
+
+        runInBackground(audio_tools.renderWithEffects, song["path"], outputPath, effects["rate"], effects["keepPitch"],
+                        effects["reverbWet"], effects["reverbSize"], settings.get("audioQuality"),
+                        onFinished=onFinished, onError=lambda message: self.showStatus(f"Errore: {message[:120]}", 6000))
 
     # ---------- video in background ----------
     def toggleAmbient(self):
@@ -1332,9 +1413,6 @@ class MainWindow(QMainWindow):
         self.player.setRepeat(int(settings.get("repeatMode")))
         self.player.shuffle = bool(settings.get("shuffle"))
         self.player.modesChanged.emit()
-        rate = float(settings.get("playbackRate") or 1.0)
-        if rate != 1.0:
-            self.playerBar.setRate(rate)
         queueIds = settings.get("lastQueue") or []
         songs = self.database.getSongs(queueIds)
         if songs:
@@ -1360,7 +1438,6 @@ class MainWindow(QMainWindow):
         settings.set("muted", self.player.muted)
         settings.set("repeatMode", self.player.repeatMode)
         settings.set("shuffle", self.player.shuffle)
-        settings.set("playbackRate", self.player.playbackRate())
         settings.set("lastQueue", [song["id"] for song in self.player.queue][:2000])
         settings.set("lastSongId", current.get("id") if current else None)
         settings.set("lastPosition", self.player.position())

@@ -104,3 +104,34 @@ def cutAudio(inputPath, outputPath, startMs, endMs, removeSelection=False, fadeI
 def convertToMp3(inputPath, outputPath, quality="192"):
     runFfmpeg(["-i", inputPath, "-vn", "-map_metadata", "-1", "-c:a", "libmp3lame", "-b:a", f"{quality}k", outputPath])
     return outputPath
+
+
+def renderWithEffects(inputPath, outputPath, rate, keepPitch, reverbWet, reverbSize, quality="192"):
+    """Bakes speed / pitch / reverb into a new file (same sound as the live player)."""
+    import numpy
+    import tempfile
+    import wave
+    from .audio_engine import CHANNELS, SAMPLE_RATE, applyReverbOffline, speedFilter
+    arguments = ["-i", inputPath, "-vn", "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE)]
+    audioFilter = speedFilter(rate, keepPitch)
+    if audioFilter:
+        arguments += ["-af", audioFilter]
+    rawData = runFfmpeg(arguments + ["-f", "f32le", "-acodec", "pcm_f32le", "-"], captureOutput=True)
+    samples = numpy.frombuffer(rawData, dtype=numpy.float32).reshape(-1, CHANNELS)
+    samples = applyReverbOffline(samples.copy(), reverbWet, reverbSize)
+    temporaryFolder = tempfile.mkdtemp()
+    wavePath = os.path.join(temporaryFolder, "render.wav")
+    try:
+        with wave.open(wavePath, "wb") as waveFile:
+            waveFile.setnchannels(CHANNELS)
+            waveFile.setsampwidth(2)
+            waveFile.setframerate(SAMPLE_RATE)
+            waveFile.writeframes((numpy.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+        runFfmpeg(["-i", wavePath, "-c:a", "libmp3lame", "-b:a", f"{quality}k", outputPath])
+    finally:
+        try:
+            os.remove(wavePath)
+            os.rmdir(temporaryFolder)
+        except OSError:
+            pass
+    return outputPath

@@ -73,7 +73,7 @@ class EqSlider(QSlider):
         margin = 8
         active = self.isEnabled()
         accent = QColor(theme.ACCENT if active else theme.MUTED)
-        zeroRatio = self._ratio(0)
+        zeroRatio = self._ratio(getattr(self, "zeroValue", 0))
         valueRatio = self._ratio(self.value())
         if self.orientation() == Qt.Vertical:
             centerX = self.width() / 2

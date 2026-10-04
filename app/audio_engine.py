@@ -97,12 +97,55 @@ def _softLimit(samples):
     return samples
 
 
+def speedFilter(rate, keepPitch=True):
+    """ffmpeg filter for a speed change: keepPitch=True time-stretches, False changes the pitch too (like a record)."""
+    if abs(rate - 1.0) < 0.001:
+        return None
+    if keepPitch:
+        return f"atempo={rate:.4f}"
+    return f"aresample={SAMPLE_RATE},asetrate={int(round(SAMPLE_RATE * rate))},aresample={SAMPLE_RATE}"
+
+
+def makeImpulseResponse(decaySeconds=1.8, seed=7):
+    """Synthetic stereo room impulse response (decaying filtered noise + early reflections), unit energy."""
+    from scipy.signal import lfilter
+    decaySeconds = max(0.2, min(6.0, float(decaySeconds)))
+    length = int(SAMPLE_RATE * decaySeconds * 1.1)
+    generator = numpy.random.default_rng(seed)
+    times = numpy.arange(length) / SAMPLE_RATE
+    envelope = numpy.exp(-6.9 * times / decaySeconds)
+    response = generator.standard_normal((length, CHANNELS)) * envelope[:, None]
+    smoothing = 0.35 + min(0.5, decaySeconds / 10)
+    response = lfilter([1 - smoothing], [1, -smoothing], response, axis=0)
+    preDelay = int(0.018 * SAMPLE_RATE)
+    response = numpy.vstack([numpy.zeros((preDelay, CHANNELS)), response])
+    for delay, gain in ((0.011, 0.6), (0.019, 0.45), (0.027, 0.35), (0.041, 0.25)):
+        index = int(delay * SAMPLE_RATE)
+        response[index, 0] += gain
+        response[index + 37, 1] += gain
+    response /= numpy.sqrt(numpy.sum(response ** 2) / CHANNELS)
+    return response.astype(numpy.float32)
+
+
+def applyReverbOffline(samples, wet, decaySeconds):
+    """Same reverb as the live one, for exporting a file. samples: float32 [n, 2]."""
+    from scipy.signal import oaconvolve
+    if wet <= 0.001:
+        return samples
+    response = makeImpulseResponse(decaySeconds)
+    wetSignal = numpy.stack([oaconvolve(samples[:, channel], response[:, channel])[:len(samples)] for channel in range(CHANNELS)], axis=1)
+    mixed = samples * (1.0 - 0.45 * wet) + wetSignal * (0.6 * wet)
+    peak = float(numpy.max(numpy.abs(mixed))) or 1.0
+    return (mixed / max(1.0, peak / 0.98)).astype(numpy.float32)
+
+
 class _Decoder(threading.Thread):
-    def __init__(self, engine, path, rate, generation, estimatedSeconds):
+    def __init__(self, engine, path, rate, generation, estimatedSeconds, keepPitch=True):
         super().__init__(daemon=True)
         self.engine = engine
         self.path = path
         self.rate = rate
+        self.keepPitch = keepPitch
         self.generation = generation
         self.estimatedFrames = int(max(30.0, estimatedSeconds / rate + 5) * SAMPLE_RATE)
         self.process = None
@@ -112,8 +155,9 @@ class _Decoder(threading.Thread):
         executable = ffmpegExe()
         command = [executable, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", self.path, "-vn",
                    "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE)]
-        if abs(self.rate - 1.0) > 0.001:
-            command += ["-af", f"atempo={self.rate:.3f}"]
+        audioFilter = speedFilter(self.rate, self.keepPitch)
+        if audioFilter:
+            command += ["-af", audioFilter]
         command += ["-f", "s16le", "-acodec", "pcm_s16le", "-"]
         try:
             self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_FLAGS)
@@ -180,6 +224,12 @@ class AudioEngine(QObject):
         self._state = QMediaPlayer.StoppedState
         self._status = QMediaPlayer.NoMedia
         self._rate = 1.0
+        self._keepPitch = True
+        self.reverbWet = 0.0
+        self.reverbSize = 1.8
+        self.reverbSpectra = {}
+        self.reverbResponse = None
+        self.reverbTail = None
         self._volume = 0.5
         self._muted = False
         self._balance = 0.0
@@ -254,7 +304,7 @@ class AudioEngine(QObject):
             pass
         if estimatedSeconds:
             self._setDuration(int(estimatedSeconds * 1000))
-        self.decoder = _Decoder(self, path, self._rate, self.generation, estimatedSeconds or 300)
+        self.decoder = _Decoder(self, path, self._rate, self.generation, estimatedSeconds or 300, self._keepPitch)
         if startMs:
             self.pendingSeekMs = startMs
         self.decoder.start()
@@ -312,12 +362,22 @@ class AudioEngine(QObject):
         self.lastEmittedPosition = positionMs
         self.positionChanged.emit(positionMs)
 
-    def setPlaybackRate(self, rate):
+    def presetRate(self, rate, keepPitch=True):
+        """Sets speed/pitch mode for the NEXT source without re-decoding the current one."""
+        self._rate = max(0.5, min(2.0, float(rate)))
+        self._keepPitch = bool(keepPitch)
+
+    def keepPitch(self):
+        return self._keepPitch
+
+    def setPlaybackRate(self, rate, keepPitch=None):
         rate = max(0.5, min(2.0, float(rate)))
-        if abs(rate - self._rate) < 0.001:
+        keepPitch = self._keepPitch if keepPitch is None else bool(keepPitch)
+        if abs(rate - self._rate) < 0.001 and keepPitch == self._keepPitch:
             return
         currentMs = self.position()
         self._rate = rate
+        self._keepPitch = keepPitch
         if self._path:
             self._cancelDecoder()
             with self.lock:
@@ -375,6 +435,60 @@ class AudioEngine(QObject):
             if newSos is None or self.sos is None or newSos.shape != self.sos.shape:
                 self.zi = None
             self.sos = newSos
+
+    # ---------- reverb ----------
+    def setReverb(self, wet, decaySeconds):
+        wet = max(0.0, min(1.0, float(wet)))
+        decaySeconds = max(0.2, min(6.0, float(decaySeconds)))
+        response = None
+        if wet > 0.001:
+            if self.reverbResponse is not None and abs(decaySeconds - self.reverbSize) < 0.01:
+                response = self.reverbResponse
+            else:
+                response = makeImpulseResponse(decaySeconds)
+        with self.lock:
+            if response is not self.reverbResponse:
+                self.reverbSpectra = {}
+                self.reverbTail = None
+            self.reverbResponse = response
+            self.reverbWet = wet
+            self.reverbSize = decaySeconds
+
+    def _prepareReverb(self, blockSize):
+        response = self.reverbResponse
+        partitions = int(numpy.ceil(len(response) / blockSize))
+        padded = numpy.zeros((partitions * blockSize, CHANNELS), dtype=numpy.float32)
+        padded[:len(response)] = response
+        spectra = numpy.empty((partitions, blockSize + 1, CHANNELS), dtype=numpy.complex64)
+        for index in range(partitions):
+            segment = numpy.zeros((2 * blockSize, CHANNELS), dtype=numpy.float32)
+            segment[:blockSize] = padded[index * blockSize:(index + 1) * blockSize]
+            spectra[index] = numpy.fft.rfft(segment, axis=0)
+        self.reverbSpectra = {"blockSize": blockSize, "spectra": spectra,
+                              "history": numpy.zeros((partitions, blockSize + 1, CHANNELS), dtype=numpy.complex64),
+                              "position": 0, "previous": numpy.zeros((blockSize, CHANNELS), dtype=numpy.float32)}
+
+    def _applyReverb(self, samples):
+        """Uniformly partitioned overlap-save convolution: cheap enough for the audio callback."""
+        if self.reverbResponse is None or self.reverbWet <= 0.001:
+            return samples
+        blockSize = len(samples)
+        state = self.reverbSpectra
+        if not state or state.get("blockSize") != blockSize:
+            self._prepareReverb(blockSize)
+            state = self.reverbSpectra
+        current = samples.astype(numpy.float32)
+        inputSpectrum = numpy.fft.rfft(numpy.vstack([state["previous"], current]), axis=0)
+        state["previous"] = current
+        partitions = len(state["spectra"])
+        position = (state["position"] + 1) % partitions
+        state["position"] = position
+        state["history"][position] = inputSpectrum
+        order = (position - numpy.arange(partitions)) % partitions
+        outputSpectrum = numpy.einsum("kfc,kfc->fc", state["history"][order], state["spectra"])
+        wetSignal = numpy.fft.irfft(outputSpectrum, 2 * blockSize, axis=0)[blockSize:]
+        wet = self.reverbWet
+        return samples * (1.0 - 0.45 * wet) + wetSignal * (0.6 * wet)
 
     # ---------- output stream ----------
     def _ensureStream(self):
@@ -465,6 +579,7 @@ class AudioEngine(QObject):
                 if self.zi is None or self.zi.shape[0] != sos.shape[0]:
                     self.zi = numpy.zeros((sos.shape[0], 2, CHANNELS))
                 samples, self.zi = sosfilt(sos, samples, axis=0, zi=self.zi)
+            samples = self._applyReverb(samples)
             gain = 0.0 if self._muted else self._volume * self.preampFactor
             samples = samples * gain
             if self._balance:

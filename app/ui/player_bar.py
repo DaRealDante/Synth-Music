@@ -100,6 +100,7 @@ class PlayerBar(QFrame):
     openEqualizer = Signal()
     openNowPlaying = Signal()
     ambientModeChosen = Signal(str)
+    effectsRequested = Signal()
     openLyrics = Signal()
     artistClicked = Signal()
 
@@ -201,8 +202,8 @@ class PlayerBar(QFrame):
         self.loopButton.clicked.connect(self.openLoops)
         self.cutButton = _toolButton("cut", "Taglia audio")
         self.cutButton.clicked.connect(self.cutRequested)
-        self.speedButton = _toolButton("speed", "Velocità di riproduzione")
-        self.speedMenu = self._buildSpeedMenu()
+        self.speedButton = _toolButton("speed", "Velocità, pitch e reverb (per canzone)")
+        self.speedButton.clicked.connect(self.effectsRequested)
         self.timerButton = _toolButton("timer", "Timer spegnimento")
         self.timerMenu = self._buildTimerMenu()
         self.nowPlayingButton = _toolButton("mic", "Testo (T) — freccia per le opzioni")
@@ -232,7 +233,7 @@ class PlayerBar(QFrame):
         self.volumeSlider.setRange(0, 100)
         self.volumeSlider.setFixedWidth(92)
         self.volumeSlider.valueChanged.connect(self.player.setVolume)
-        for widget in (self.nowPlayingButton, self.ambientButton, self.queueButton, self.eqButton, self.loopButton,
+        for widget in (self.nowPlayingButton, self.ambientButton, self.speedButton, self.queueButton, self.eqButton, self.loopButton,
                        self.moreButton, self.volumeButton, self.volumeSlider):
             rightLayout.addWidget(widget)
         rightWidget.setMinimumWidth(rightWidget.sizeHint().width())
@@ -247,25 +248,12 @@ class PlayerBar(QFrame):
         player.loopChanged.connect(self.onLoopChanged)
         self.onModesChanged()
 
-    def _buildSpeedMenu(self):
-        menu = QMenu(self)
-        group = QActionGroup(menu)
-        for rate in (0.5, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0):
-            action = QAction(f"{rate:g}x", menu, checkable=True)
-            action.setChecked(rate == 1.0)
-            action.triggered.connect(lambda checked=False, value=rate: self.setRate(value))
-            group.addAction(action)
-            menu.addAction(action)
-        self.speedGroup = group
-        return menu
-
-    def setRate(self, rate):
-        self.player.setPlaybackRate(rate)
-        for action in self.speedGroup.actions():
-            action.setChecked(action.text() == f"{rate:g}x")
-        self.speedButton.setIcon(theme.icon("speed", theme.ACCENT if rate != 1.0 else theme.SUBTEXT, 18))
-        self.speedButton.setToolTip(f"Velocità: {rate:g}x")
-        self._updateMoreIndicator()
+    def setEffectsIndicator(self, effects):
+        active = abs(effects["rate"] - 1.0) > 0.005 or effects["reverbWet"] > 0.005
+        self.speedButton.setIcon(theme.icon("speed", theme.ACCENT if active else theme.SUBTEXT, 18))
+        details = f"{effects['rate']:.2f}x" + ("" if effects["keepPitch"] else ", pitch libero") + \
+            (f", reverb {int(effects['reverbWet'] * 100)}%" if effects["reverbWet"] > 0.005 else "")
+        self.speedButton.setToolTip(f"Velocità ed effetti: {details}")
 
     def _buildAmbientMenu(self):
         menu = QMenu(self)
@@ -290,9 +278,7 @@ class PlayerBar(QFrame):
     def _buildMoreMenu(self):
         menu = QMenu(self)
         menu.addAction(theme.icon("cut"), "Taglia audio...", self.cutRequested.emit)
-        speedAction = menu.addMenu(self.speedMenu)
-        speedAction.setIcon(theme.icon("speed"))
-        speedAction.setText("Velocità")
+        menu.addAction(theme.icon("speed"), "Velocità ed effetti...", self.effectsRequested.emit)
         timerAction = menu.addMenu(self.timerMenu)
         timerAction.setIcon(theme.icon("timer"))
         timerAction.setText("Timer spegnimento")
@@ -303,7 +289,7 @@ class PlayerBar(QFrame):
     def _updateMoreIndicator(self):
         if not hasattr(self, "moreButton"):
             return
-        active = abs(self.player.playbackRate() - 1.0) > 0.01 or self.sleepTimer.isActive() or self.player.stopAfterCurrent
+        active = self.sleepTimer.isActive() or self.player.stopAfterCurrent
         self.moreButton.setIcon(theme.icon("more", theme.ACCENT if active else theme.SUBTEXT, 18))
 
     def _buildTimerMenu(self):

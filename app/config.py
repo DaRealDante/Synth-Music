@@ -4,7 +4,7 @@ import shutil
 import sys
 
 APP_NAME = "Synth Music"
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 UPDATE_REPO = "DaRealDante/Synth-Music"  # "utente/repository" su GitHub: lo compila da solo PUBBLICA_AGGIORNAMENTO.bat
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".webm"}

@@ -201,3 +201,11 @@ def adaptToCut(result, cutInfo):
         synced = applyCutsToSynced(result["synced"], operations)
         return {"plain": plainFromSynced(synced), "synced": synced}
     return result
+
+
+def scaleSynced(syncedText, rate):
+    """Timestamps for a file played/rendered at `rate` speed."""
+    lines = parseSynced(syncedText)
+    if not lines or rate <= 0:
+        return syncedText
+    return "\n".join(f"{_formatStamp(stamp / rate)}{text}" for stamp, text in lines)
