@@ -51,7 +51,7 @@ def _fetchLyricsOvh(title, artist):
 
 
 def _cleanTitle(title):
-    title = re.sub(r"\s*[\(\[][^\)\]]*(feat|ft\.|official|video|audio|lyrics?|testo|remaster|hd|4k)[^\)\]]*[\)\]]", "",
+    title = re.sub(r"\s*[\(\[][^\)\]]*(feat|ft\.|official|video|audio|lyrics?|testo|remaster|hd|4k|taglio)[^\)\]]*[\)\]]", "",
                    title or "", flags=re.IGNORECASE)
     title = re.sub(r"\s+-\s+(remaster(ed)?|live|radio edit).*$", "", title, flags=re.IGNORECASE)
     return title.strip()
@@ -161,3 +161,43 @@ def searchLyrics(query, durationSeconds=0):
 
 def defaultQuery(title, artist):
     return f"{_mainArtist(artist)} {_cleanTitle(title)}".strip()
+
+
+def _formatStamp(milliseconds):
+    minutes, rest = divmod(max(0, int(milliseconds)), 60000)
+    return f"[{minutes:02d}:{rest / 1000:05.2f}]"
+
+
+def applyCutsToSynced(syncedText, operations):
+    """Shifts/drops LRC lines so they match an audio file that was cut with the given operations (in order)."""
+    lines = parseSynced(syncedText)
+    if not lines:
+        return syncedText
+    for operation in operations:
+        startMs, endMs = int(operation["startMs"]), int(operation["endMs"])
+        if operation.get("mode") == "keep":
+            kept = [(stamp - startMs, text) for stamp, text in lines if startMs <= stamp < endMs]
+            before = [line for line in lines if line[0] < startMs]
+            if before and before[-1][1].strip() and (not kept or kept[0][0] > 400):
+                kept.insert(0, (0, before[-1][1]))
+            lines = kept
+        else:
+            removedLength = endMs - startMs
+            lines = [(stamp, text) for stamp, text in lines if stamp < startMs] + \
+                    [(stamp - removedLength, text) for stamp, text in lines if stamp >= endMs]
+    return "\n".join(f"{_formatStamp(stamp)}{text}" for stamp, text in lines)
+
+
+def plainFromSynced(syncedText):
+    return "\n".join(text for _, text in parseSynced(syncedText))
+
+
+def adaptToCut(result, cutInfo):
+    """result from fetchLyrics for the ORIGINAL song -> lyrics for the cut file."""
+    if not result or not cutInfo:
+        return result
+    operations = cutInfo.get("operations") or []
+    if result.get("synced"):
+        synced = applyCutsToSynced(result["synced"], operations)
+        return {"plain": plainFromSynced(synced), "synced": synced}
+    return result

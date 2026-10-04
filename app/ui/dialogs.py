@@ -442,13 +442,14 @@ class CutDialog(QDialog):
         runInBackground(
             audio_tools.cutAudio, self.song["path"], outputPath, startMs, endMs, removeSelection,
             self.fadeInSpin.value(), self.fadeOutSpin.value(), settings.get("audioQuality"),
-            onFinished=lambda path: self._onCutDone(path, newTitle, replaceOriginal),
+            onFinished=lambda path: self._onCutDone(path, newTitle, replaceOriginal,
+                                                    {"mode": "remove" if removeSelection else "keep", "startMs": startMs, "endMs": endMs}),
             onError=self._onCutError,
         )
 
-    def _onCutDone(self, outputPath, newTitle, replaceOriginal):
+    def _onCutDone(self, outputPath, newTitle, replaceOriginal, cutOperation=None):
         self.statusLabel.setText("Fatto!")
-        self.onDone(self.song, outputPath, newTitle, replaceOriginal)
+        self.onDone(self.song, outputPath, newTitle, replaceOriginal, cutOperation)
         self.accept()
 
     def _onCutError(self, message):

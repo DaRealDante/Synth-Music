@@ -35,6 +35,9 @@ Mandagli solo **`installer\SynthMusic_Setup_vX.exe`**.
 
 Il motore YouTube (yt-dlp) si aggiorna da solo una volta al giorno: non serve ricompilare quando YouTube cambia.
 
+## Novità 1.5.1
+- I testi seguono i tagli: se tagli una canzone (tieni o elimini una parte) il testo sincronizzato viene spostato/tagliato uguale
+
 ## Novità 1.4
 - **Aggiornamenti automatici** via GitHub Releases + "Controlla aggiornamenti"
 - `PUBBLICA_AGGIORNAMENTO.bat`: invia la nuova versione su GitHub, che crea l'installer da solo

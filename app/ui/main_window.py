@@ -615,7 +615,26 @@ class MainWindow(QMainWindow):
         dialog = CutDialog(self, song, self._onCutDone, initialSelection)
         dialog.exec()
 
-    def _onCutDone(self, song, outputPath, newTitle, replaceOriginal):
+    def _cutLyricsFields(self, source, cutOperation):
+        """cutInfo + lyrics for a file cut from `source`, so the lyrics keep matching the audio."""
+        if not cutOperation:
+            return {}
+        cutInfo = self._cutInfo(source) or {
+            "sourceTitle": source.get("title"), "sourceArtist": source.get("artist"), "sourceAlbum": source.get("album"),
+            "sourceDuration": source.get("duration") or 0, "operations": [],
+        }
+        cutInfo["operations"] = list(cutInfo.get("operations") or []) + [cutOperation]
+        fields = {"cutInfo": json.dumps(cutInfo)}
+        if source.get("syncedLyrics"):
+            synced = lyrics.applyCutsToSynced(source["syncedLyrics"], [cutOperation])
+            fields.update(syncedLyrics=synced, lyrics=lyrics.plainFromSynced(synced), lyricsChecked=1)
+        else:
+            fields.update(syncedLyrics=None, lyrics=None, lyricsChecked=0)
+        return fields
+
+    def _onCutDone(self, song, outputPath, newTitle, replaceOriginal, cutOperation=None):
+        source = self.database.getSong(song["id"]) or song
+        lyricsFields = self._cutLyricsFields(source, cutOperation)
         if replaceOriginal:
             current = self.player.currentSong()
             isCurrent = current and current.get("id") == song["id"]
@@ -629,7 +648,7 @@ class MainWindow(QMainWindow):
                 return
             metadata.writeMp3Tags(song["path"], song.get("title"), song.get("artist"), song.get("album"), song.get("cover"))
             duration = metadata.readTags(song["path"])["duration"]
-            self.database.updateSong(song["id"], duration=duration)
+            self.database.updateSong(song["id"], duration=duration, **lyricsFields)
             for loopData in self.database.loops(song["id"]):
                 if loopData["startMs"] >= duration * 1000:
                     self.database.deleteLoop(loopData["id"])
@@ -644,6 +663,8 @@ class MainWindow(QMainWindow):
             duration = metadata.readTags(outputPath)["duration"]
             newId = self.database.addSong(outputPath, newTitle, song.get("artist") or "", song.get("album") or "",
                                           duration, song.get("cover"), "cut", song.get("url"))
+            if lyricsFields:
+                self.database.updateSong(newId, **lyricsFields)
             self.showStatus(f"Creato \"{newTitle}\" nella libreria")
             if self.pages.currentWidget() is self.playlistPage and self.playlistPage.playlistId:
                 answer = QMessageBox.question(self, APP_NAME, "Aggiungere il nuovo brano anche a questa playlist?")
@@ -973,9 +994,25 @@ class MainWindow(QMainWindow):
                 self.showStatus("Servizio testi momentaneamente non disponibile: riprovo da solo tra poco", 5000)
             self._songDataUpdated(songId)
 
-        runInBackground(lyrics.fetchLyrics, title or song.get("title") or "", artist if artist is not None else (song.get("artist") or ""),
-                        "" if title else (song.get("album") or ""), 0 if title else (song.get("duration") or 0),
-                        onFinished=onFinished, onError=onError, pool=self.lyricsPool)
+        cutInfo = self._cutInfo(song)
+        if cutInfo and not title:
+            fetchTitle, fetchArtist = cutInfo.get("sourceTitle") or song.get("title") or "", cutInfo.get("sourceArtist") or song.get("artist") or ""
+            fetchAlbum, fetchDuration = cutInfo.get("sourceAlbum") or "", cutInfo.get("sourceDuration") or 0
+        else:
+            fetchTitle = title or song.get("title") or ""
+            fetchArtist = artist if artist is not None else (song.get("artist") or "")
+            fetchAlbum, fetchDuration = ("" if title else (song.get("album") or "")), (0 if title else (song.get("duration") or 0))
+
+        def fetchAndAdapt():
+            return lyrics.adaptToCut(lyrics.fetchLyrics(fetchTitle, fetchArtist, fetchAlbum, fetchDuration), cutInfo)
+
+        runInBackground(fetchAndAdapt, onFinished=onFinished, onError=onError, pool=self.lyricsPool)
+
+    def _cutInfo(self, song):
+        try:
+            return json.loads(song.get("cutInfo") or "null")
+        except (ValueError, TypeError):
+            return None
 
     def searchLyricsManually(self, song):
         if not song:
@@ -985,7 +1022,8 @@ class MainWindow(QMainWindow):
         if result == 2:
             self.editLyrics(song)
         elif result == LyricsSearchDialog.Accepted and dialog.selected:
-            self.database.updateSong(song["id"], lyrics=dialog.selected["plain"], syncedLyrics=dialog.selected["synced"],
+            chosen = lyrics.adaptToCut(dialog.selected, self._cutInfo(self.database.getSong(song["id"]) or song))
+            self.database.updateSong(song["id"], lyrics=chosen["plain"], syncedLyrics=chosen["synced"],
                                      lyricsChecked=1, lyricsAuto=1)
             self._songDataUpdated(song["id"])
             self.showStatus("Testo salvato")
