@@ -19,6 +19,7 @@ class VideoController(QObject):
         self.mediaPlayer = QMediaPlayer(self)
         self.sink = QVideoSink(self)
         self.mediaPlayer.setVideoSink(self.sink)
+        self.mediaPlayer.setLoops(QMediaPlayer.Infinite)
         self.sink.videoFrameChanged.connect(self._onFrame)
         self.mediaPlayer.errorOccurred.connect(self._onError)
         self.clients = {}
@@ -97,13 +98,14 @@ class VideoController(QObject):
         videoState = self.mediaPlayer.playbackState()
         duration = self.mediaPlayer.duration()
         target = self.player.position()
-        if duration and target > duration:
-            if videoState == QMediaPlayer.PlayingState:
-                self.mediaPlayer.pause()
-            return
+        if duration > 0:
+            target = target % duration
         if abs(self.mediaPlayer.playbackRate() - self.player.playbackRate()) > 0.01:
             self.mediaPlayer.setPlaybackRate(self.player.playbackRate())
-        if abs(self.mediaPlayer.position() - target) > 300:
+        drift = abs(self.mediaPlayer.position() - target)
+        if duration > 0:
+            drift = min(drift, duration - drift)
+        if drift > 300:
             self.mediaPlayer.setPosition(target)
         if audioPlaying and videoState != QMediaPlayer.PlayingState:
             self.mediaPlayer.play()

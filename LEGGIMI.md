@@ -35,6 +35,9 @@ Mandagli solo **`installer\SynthMusic_Setup_vX.exe`**.
 
 Il motore YouTube (yt-dlp) si aggiorna da solo una volta al giorno: non serve ricompilare quando YouTube cambia.
 
+## Novità 1.6.1
+- I video ora vanno in **loop** se sono più corti della canzone (prima si fermavano)
+
 ## Novità 1.6
 - **Velocità, pitch e reverb per canzone** (bottone ⏩ in basso a destra): slider 0.50x–2.00x, "mantieni il pitch", reverb con grandezza stanza, preset (Slowed + Reverb, Sped up, Nightcore). Si salva per ogni canzone.
 - **Salva come nuova canzone** con gli effetti applicati (il testo sincronizzato si adatta alla velocità)
