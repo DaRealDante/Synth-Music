@@ -283,6 +283,10 @@ def publish():
     remoteTags = git("ls-remote", "--tags", "origin", check=False, capture=True).stdout
     if f"refs/tags/{tag}" in remoteTags:
         fail(f"La versione {version} e' gia' pubblicata. Serve una versione nuova (VERSION in app/config.py).")
+    # Always publish from the "main" branch, whatever branch this folder is on (e.g. a copy prepared on another branch).
+    branch = git("rev-parse", "--abbrev-ref", "HEAD", check=False, capture=True).stdout.strip()
+    if branch and branch != "main" and branch != "HEAD":
+        git("checkout", "-B", "main", check=False, capture=True)
     if git("fetch", "origin", "main", check=False, capture=True).returncode == 0:
         # GitHub may have commits made elsewhere (e.g. a friend's pull request): put this version on top of them,
         # so the push is accepted. The files on disk (this new version) are what gets published.
@@ -291,7 +295,7 @@ def publish():
     git("commit", "-m", f"Synth Music {tag}", check=False)
     git("tag", "-f", tag)
     say("Invio a GitHub (la prima volta si apre il browser per fare il login)...")
-    git("push", "-u", "origin", "main")
+    git("push", "-u", "origin", "HEAD:main")
     git("push", "origin", tag)
     actionsUrl = f"https://github.com/{repoSlug}/actions"
     say()

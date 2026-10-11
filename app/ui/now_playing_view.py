@@ -523,7 +523,8 @@ class NowPlayingView(Page):
     def setSong(self, song, force=False):
         fresh = self.window.database.getSong(song["id"]) if song and song.get("id") else song
         if not force and self.song and fresh and self.song.get("id") == fresh.get("id") and \
-                self.song.get("lyrics") == fresh.get("lyrics") and self.song.get("videoPath") == fresh.get("videoPath"):
+                self.song.get("lyrics") == fresh.get("lyrics") and self.song.get("videoPath") == fresh.get("videoPath") and \
+                self.song.get("cover") == fresh.get("cover"):
             return
         self.song = fresh
         if not fresh:

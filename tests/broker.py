@@ -13,6 +13,40 @@ def freePort():
         return probe.getsockname()[1]
 
 
+def startMosquitto(websockets=False):
+    port = freePort()
+    folder = tempfile.mkdtemp()
+    configPath = os.path.join(folder, "mosquitto.conf")
+    with open(configPath, "w") as configFile:
+        configFile.write(f"listener {port} 127.0.0.1\n" + ("protocol websockets\n" if websockets else "")
+                         + "allow_anonymous true\npersistence false\n")
+    process = subprocess.Popen(["mosquitto", "-c", configPath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    return port, process
+
+
+@pytest.fixture(scope="session")
+def secondBroker():
+    port, process = startMosquitto()
+    yield port
+    process.terminate()
+    process.wait(5)
+
+
+@pytest.fixture(scope="session")
+def webSocketBroker():
+    port, process = startMosquitto(websockets=True)
+    yield port
+    process.terminate()
+    process.wait(5)
+
+
 @pytest.fixture(scope="session")
 def localBroker():
     port = freePort()

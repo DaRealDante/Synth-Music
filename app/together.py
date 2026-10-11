@@ -5,6 +5,7 @@ import time
 import uuid
 
 from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtMultimedia import QMediaPlayer
 
 from .config import TEMP_DIR, settings
 from .database import isStreamPath
@@ -19,6 +20,8 @@ FILE_ID_CACHE_SECONDS = 120
 REUPLOAD_AFTER_SECONDS = 50 * 60
 MAX_SHARED_QUEUE = 400
 STATE_WAIT_MS = 4000
+RECOVER_FIRST_DELAY_SECONDS = 2
+RECOVER_RETRY_SECONDS = 15
 
 _ANIMALS = ["Volpe", "Lupo", "Gufo", "Panda", "Tigre", "Delfino", "Falco", "Koala", "Lince", "Orso", "Puma", "Corvo",
             "Fenice", "Drago", "Gatto", "Riccio", "Squalo", "Cobra", "Lemure", "Bisonte"]
@@ -82,6 +85,9 @@ class TogetherController(QObject):
         self.roomEffects = None
         self.pendingSeek = False
         self.joinedAt = 0
+        self.recovery = None
+        self.publishedCoverKey = None
+        self.coverRequests = set()
 
         self.publishTimer = QTimer(self)
         self.publishTimer.setSingleShot(True)
@@ -151,13 +157,14 @@ class TogetherController(QObject):
             self.leaveRoom()
         self.code = code
         self.state = None
+        self.publishedCoverKey = None
         self.version = 0
         self.peers = {}
         self.roomEffects = None
         self.joinedAt = nowMs()
         self.waitingForState = waitForState
         self.player.skipOnError = False
-        self.link.watch(code, ["state", "msg", "presence/+", "files/+"])
+        self.link.watch(code, ["state", "msg", "presence/+", "files/+", "cover"])
         self.link.setWill(code, f"presence/{self.myId()}")
         self._publishPresence()
         if self.link.running:
@@ -298,6 +305,24 @@ class TogetherController(QObject):
         }
         self.link.publish(self.code, "state", self.state, retain=True)
         self._ensureUploads()
+        self._publishCover(current, currentKey)
+
+    def _publishCover(self, song, key):
+        """Small picture of the song playing, so friends see the cover too (personal mp3s, Spotify imports...)."""
+        if song is None or not key or key == self.publishedCoverKey:
+            return
+        self.publishedCoverKey = key
+        coverPath = song.get("cover")
+        if not coverPath or not os.path.isfile(coverPath):
+            return
+        try:
+            from .playlist_sync import coverToBase64
+            data = coverToBase64(coverPath)
+        except Exception as error:
+            print(f"[Stanza] copertina non inviata: {error!r}")
+            return
+        if data:
+            self.link.publish(self.code, "cover", {"key": key, "data": data}, retain=True)
 
     # ---------- remote changes ----------
     def _onReceived(self, code, subtopic, payload):
@@ -309,6 +334,8 @@ class TogetherController(QObject):
             self._onPresence(subtopic[len("presence/"):], payload)
         elif subtopic == "msg" and isinstance(payload, dict):
             self._onMessage(payload)
+        elif subtopic == "cover" and isinstance(payload, dict):
+            self._onRemoteCover(payload)
         elif subtopic.startswith("files/") and isinstance(payload, dict):
             if payload.get("failed") or (validRoomFile(payload)):
                 self.fileInfos[subtopic[len("files/"):]] = payload
@@ -371,6 +398,9 @@ class TogetherController(QObject):
                 self.player.originalQueue = list(songs)
                 self.player.currentIndex = index
                 self.player.queueChanged.emit()
+            for song in songs[index:index + 2]:
+                if not (song.get("cover") and os.path.isfile(song["cover"])):
+                    self._requestThumbnail(self._trackOf(song), song.get("id"))
             expected = self._targetPosition(state)
             if not sameSong:
                 self.player._loadCurrent(autoplay=bool(state.get("playing")) and expected >= 0, startPosition=max(0, expected))
@@ -380,6 +410,9 @@ class TogetherController(QObject):
                                                        "reverbSize": self.player.mediaPlayer.reverbSize,
                                                        "bassBoost": self.player.mediaPlayer.bassBoost}):
                 self._applyEffects(effects)
+            if self._couldNotLoad():
+                self._recoverPlayback(state, expected)
+                return
             if expected < 0:
                 if self.player.isPlaying():
                     self.player.mediaPlayer.pause()
@@ -391,6 +424,62 @@ class TogetherController(QObject):
                 self.player.mediaPlayer.play()
             elif not state.get("playing") and self.player.isPlaying():
                 self.player.mediaPlayer.pause()
+        finally:
+            self.applying -= 1
+
+    # ---------- covers of friends' songs ----------
+    def _songsWithoutCover(self, key):
+        return [song for song in self.player.queue if song and self._keyOf(song) == key
+                and not (song.get("cover") and os.path.isfile(song["cover"]))]
+
+    def _onRemoteCover(self, payload):
+        key, data = payload.get("key"), payload.get("data")
+        if not isinstance(key, str) or not isinstance(data, str) or not data or len(data) > 400000:
+            return
+        if not self._songsWithoutCover(key):
+            return
+        try:
+            import base64
+            from .metadata import saveCoverBytes
+            coverPath = saveCoverBytes(base64.b64decode(data))
+        except Exception as error:
+            print(f"[Stanza] copertina ricevuta non valida: {error!r}")
+            return
+        self._setCover(key, coverPath)
+
+    def _requestThumbnail(self, track, songId):
+        """YouTube songs: the cover is the video thumbnail, downloaded in the background."""
+        from .together_sync import youtubeId
+        videoId = youtubeId(track.get("url"))
+        if not videoId or songId in self.coverRequests:
+            return
+        self.coverRequests.add(songId)
+        key = track.get("key")
+
+        def download():
+            from .downloader import fetchBytes
+            from .metadata import saveCoverBytes
+            return saveCoverBytes(fetchBytes(f"https://i.ytimg.com/vi/{videoId}/mqdefault.jpg"))
+
+        runInBackground(download, onFinished=lambda coverPath: self._setCover(key, coverPath),
+                        onError=lambda message: self.coverRequests.discard(songId))
+
+    def _setCover(self, key, coverPath):
+        if not coverPath:
+            return
+        songs = self._songsWithoutCover(key)
+        if not songs:
+            return
+        current = self.player.currentSong()
+        self.applying += 1
+        try:
+            for song in songs:
+                if song.get("id") and song.get("hidden"):
+                    self.database.updateSong(song["id"], cover=coverPath)
+                song["cover"] = coverPath
+            if current is not None and any(song is current for song in songs):
+                self.player.songChanged.emit(current)
+            self.player.queueChanged.emit()
         finally:
             self.applying -= 1
 
@@ -425,6 +514,10 @@ class TogetherController(QObject):
         if current is None or self._keyOf(current) != self._currentTrackKey(state):
             return
         expected = self._targetPosition(state)
+        if self._couldNotLoad():
+            self._recoverPlayback(state, expected)
+            return
+        self.recovery = None
         self.applying += 1
         try:
             if expected < 0:
@@ -439,6 +532,45 @@ class TogetherController(QObject):
                     self.player.mediaPlayer.play()
             if abs(self.player.position() - expected) > DRIFT_TOLERANCE_MS and (state.get("playing") or not self.player.isPlaying()):
                 self.player.mediaPlayer.setPosition(expected)
+        finally:
+            self.applying -= 1
+
+    def _couldNotLoad(self):
+        """The room's song is selected but nothing is loaded (streaming failed): moving the position would only
+        move the bar in silence."""
+        media = self.player.mediaPlayer
+        return not self.player.loading and (media.source().isEmpty() or media.mediaStatus() == QMediaPlayer.InvalidMedia)
+
+    def _recoverPlayback(self, state, expected):
+        """Retries the room's song by itself: first a fresh link, then a temporary download, then every few seconds."""
+        current = self.player.currentSong()
+        if current is None:
+            return
+        key = self._keyOf(current)
+        now = time.monotonic()
+        if self.recovery is None or self.recovery["key"] != key:
+            self.recovery = {"key": key, "attempts": 0, "nextAt": now + RECOVER_FIRST_DELAY_SECONDS}
+            return
+        if now < self.recovery["nextAt"]:
+            return
+        attempts = self.recovery["attempts"] = self.recovery["attempts"] + 1
+        self.recovery["nextAt"] = now + RECOVER_RETRY_SECONDS
+        if attempts == 2:
+            self.notify(f"Non riesco a riprodurre \"{current.get('title') or 'la canzone'}\": riprovo da solo")
+        print(f"[Stanza] riprovo a caricare {current.get('title')!r} (tentativo {attempts})")
+        startPosition = max(0, expected)
+        autoplay = bool(state.get("playing")) and expected >= 0
+        path = str(current.get("path") or "")
+        self.applying += 1
+        try:
+            if isStreamPath(path) and attempts % 2 == 0 and "roomfile:" not in path:
+                self.player._loadFallback(current, startPosition)
+            else:
+                if isStreamPath(path):
+                    from .player import _forgetStream
+                    from .database import streamTarget
+                    _forgetStream(streamTarget(path))
+                self.player._loadCurrent(autoplay=autoplay, startPosition=startPosition)
         finally:
             self.applying -= 1
 
@@ -523,7 +655,7 @@ class TogetherController(QObject):
             code = self.code
             runInBackground(self._uploadFile, song["path"], fileId, pool=self.uploadPool,
                             onFinished=lambda info, code=code: self._onUploaded(code, info),
-                            onError=lambda message, fileId=fileId, code=code: self._onUploadFailed(code, fileId, message))
+                            onError=lambda message, fileId=fileId, code=code, title=song.get("title"): self._onUploadFailed(code, fileId, message, title))
 
     @staticmethod
     def _uploadFile(path, fileId):
@@ -543,14 +675,15 @@ class TogetherController(QObject):
         if code == self.code:
             self.link.publish(code, f"files/{info['id']}", info, retain=True)
 
-    def _onUploadFailed(self, code, fileId, message):
+    def _onUploadFailed(self, code, fileId, message, title=None):
         self.uploads.pop(fileId, None)
         alreadyFailed = fileId in self.failedUploads
         self.failedUploads[fileId] = time.time()
         if code == self.code:
             self.link.publish(code, f"files/{fileId}", {"id": fileId, "failed": True}, retain=True)
         if not alreadyFailed:
-            self.notify("Non riesco a mandare la canzone agli altri: la cercheranno su YouTube")
+            print(f"[Together] upload di {title!r} non riuscito: {message}")
+            self.notify(f"Non riesco a mandare \"{title or 'la canzone'}\" agli altri (è un tuo file): la cercheranno su YouTube")
 
     def resolveRoomFile(self, target, useCache=True):
         """Runs in a worker thread: waits for the friend's upload, downloads and decrypts it; falls back to YouTube."""

@@ -256,7 +256,10 @@ class TogetherPopup(QFrame):
             copyRow.addWidget(copyCodeButton)
             layout.addLayout(copyRow)
             connected = self.controller.link.isConnected()
-            statusLabel = QLabel("● Connesso" if connected else "● Connessione in corso...")
+            link = self.controller.link
+            serverCount = f" ({link.connectedCount()}/{len(link.connections)} server)" if connected else ""
+            statusLabel = QLabel(("● Connesso" + serverCount) if connected else "● Connessione in corso...")
+            statusLabel.setToolTip(link.brokerName() if connected else "Provo tutti i server, anche dalla porta web")
             statusLabel.setObjectName("small")
             statusLabel.setStyleSheet(f"color: {theme.ACCENT if connected else '#F59B23'};")
             layout.addWidget(statusLabel)
