@@ -1,4 +1,4 @@
-# Synth Music v1.8.1
+# Synth Music v1.9.0
 
 ## Installare / aggiornare (tu)
 Doppio click su **`INSTALLA_E_AGGIORNA.bat`**. Fa tutto da solo:
@@ -57,6 +57,13 @@ Il motore YouTube (yt-dlp) si aggiorna da solo una volta al giorno: non serve ri
 - Impostazioni → **"Non scaricare: aggiungi le canzoni solo in streaming"**: il bottone Scarica diventa *Aggiungi* (vale anche per playlist YouTube e Spotify)
 - Le canzoni in streaming hanno "Streaming ·" sotto il titolo. Menu → *Scarica sul PC*; al contrario, su una canzone scaricata *Solo streaming (elimina il file)*
 - Taglia audio ed "Esporta con effetti" richiedono il file: scarica prima la canzone
+
+## Novità 1.9
+- **Nuovo logo**
+- **Crea il tuo tema** (Impostazioni → Aspetto): sfondo con **gradienti pronti**, **il tuo gradiente** (2–4 colori + direzione) o **la tua immagine / GIF animata**, con slider "Oscuramento" e anteprima dal vivo. Lo sfondo si applica subito, senza riavviare
+- **Abbina i colori allo sfondo**: accento e pannelli presi dal gradiente o dall'immagine
+- **I miei temi**: salva colori + sfondo con un nome e riapplicali quando vuoi
+- Il video di sfondo della canzone, quando c'è, resta sopra al tema; la GIF si ferma quando l'app è in secondo piano
 
 ## Novità 1.8.1
 - **Bass boost** (fino a +12 dB) nel popup velocità/effetti: si salva per canzone, vale per tutti in stanza ed entra in "Salva come nuova canzone"

@@ -155,6 +155,7 @@ class MainWindow(QMainWindow):
         central = BackdropWidget(self.videoController)
         central.setObjectName("backdrop")
         self.backdrop = central
+        self.translucentUi = False
         self.setCentralWidget(central)
         rootLayout = QVBoxLayout(central)
         rootLayout.setContentsMargins(8, 8, 8, 0)
@@ -296,6 +297,7 @@ class MainWindow(QMainWindow):
         QApplication.instance().applicationStateChanged.connect(lambda state: self._updateVideoSuspend())
         QApplication.instance().applicationStateChanged.connect(
             lambda state: state == Qt.ApplicationActive and QTimer.singleShot(300, self.updateAmbient))
+        self.applyThemeBackground()
         self.updateAmbient()
 
     # ---------- layout ----------
@@ -1306,8 +1308,7 @@ class MainWindow(QMainWindow):
         active = wanted and self.videoController.hasFrames()
         if active != self.ambientActive:
             self.ambientActive = active
-            application = QApplication.instance()
-            application.setStyleSheet(theme.STYLESHEET + (theme.AMBIENT_STYLESHEET if active else ""))
+            self._applyStylesheet()
             if active:
                 self.idleTimer.start()
                 self.cursorTimer.start()
@@ -1316,10 +1317,24 @@ class MainWindow(QMainWindow):
                 self._showInterface()
         self.backdrop.setActive(active, self.uiVisible)
 
+    def _applyStylesheet(self):
+        """See-through panels whenever something is painted behind the UI (song video or theme background)."""
+        translucent = self.ambientActive or self.backdrop.hasThemeBackground()
+        if translucent != self.translucentUi:
+            self.translucentUi = translucent
+            QApplication.instance().setStyleSheet(theme.STYLESHEET + (theme.AMBIENT_STYLESHEET if translucent else ""))
+
+    def applyThemeBackground(self):
+        self.backdrop.setThemeBackground(theme.normalizeBackground(settings.get("themeBackground")))
+        self._applyStylesheet()
+        self._updateVideoSuspend()
+
     def _updateVideoSuspend(self):
         inBackground = QApplication.instance().applicationState() != Qt.ApplicationActive
         suspended = self.isMinimized() or (inBackground and bool(settings.get("pauseVideoInBackground")))
         self.videoController.setSuspended(suspended)
+        if getattr(self, "backdrop", None) is not None:
+            self.backdrop.setPaused(suspended)
         if suspended:
             self.cursorTimer.stop()
         elif self.ambientActive:
@@ -1755,6 +1770,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() == SettingsDialog.Accepted:
             self.applyDiscordSetting()
             self.applyEffectSettings()
+            self.applyThemeBackground()
             self.updateAmbient()
             self.nowPlayingPage._loadVideo()
             if dialog.restartForColors:
