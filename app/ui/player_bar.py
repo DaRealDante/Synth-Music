@@ -4,8 +4,10 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QMenu, QSizePolicy, QSlider, QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
+from ..config import settings
 from ..player import REPEAT_ALL, REPEAT_OFF, REPEAT_ONE
 from . import theme
+from .effects import ColorFader, Visualizer, bounce, dominantColor, heartBurst
 
 
 class ClickSlider(QSlider):
@@ -142,11 +144,21 @@ class PlayerBar(QFrame):
         textColumn.addWidget(self.titleLabel)
         textColumn.addWidget(self.artistLabel)
         textColumn.addStretch()
+        self.miniVisualizer = Visualizer(self.player, bars=12)
+        self.miniVisualizer.setFixedSize(46, 22)
+        self.miniVisualizer.setVisible(bool(settings.get("fxVisualizer")))
+        self.miniVisualizer.listeners.append(self._onBass)
+        self.player.playingChanged.connect(lambda playing: self.miniVisualizer.refreshRunning())
         self.favoriteButton = _toolButton("heart", "Salva nei preferiti", 30, 16)
         self.favoriteButton.clicked.connect(self.favoriteToggled)
         leftLayout.addWidget(self.coverLabel)
         leftLayout.addLayout(textColumn, 1)
+        leftLayout.addWidget(self.miniVisualizer)
         leftLayout.addWidget(self.favoriteButton)
+        self.tintColor = None
+        self.coverGlow = 0.0
+        self.tintFader = ColorFader(self._setTint, self)
+        self.favoriteState = False
         layout.addWidget(leftWidget, 3)
 
         centerWidget = QWidget()
@@ -167,6 +179,7 @@ class PlayerBar(QFrame):
         self.playButton.setToolTip("Riproduci (Spazio)")
         self.playButton.setCursor(Qt.PointingHandCursor)
         self.playButton.clicked.connect(self.player.togglePlay)
+        self.playButton.clicked.connect(lambda: bounce(self.playButton, QSize(18, 18)))
         self.nextButton = _toolButton("next", "Successiva (Ctrl+→)")
         self.nextButton.clicked.connect(lambda: self.player.next())
         self.repeatButton = _toolButton("repeat", "Ripeti (R)")
@@ -339,12 +352,64 @@ class PlayerBar(QFrame):
             self.artistLabel.setText("")
             self.coverLabel.setPixmap(theme.placeholderCover(56))
             self.favoriteButton.setIcon(theme.icon("heart", theme.SUBTEXT, 16))
+            self.setCoverTint(None)
+            self.favoriteState = False
             return
         self.titleLabel.setText(song.get("title") or "")
         self.titleLabel.setToolTip(song.get("title") or "")
         self.artistLabel.setText("Caricamento in streaming..." if self.player.loading else (song.get("artist") or "Artista sconosciuto"))
         self.coverLabel.setPixmap(theme.coverPixmap(song.get("cover"), 56, song.get("id") or 0, 4))
-        self.setFavorite(bool(song.get("favorite")))
+        self.setCoverTint(song.get("cover"))
+        self.setFavorite(bool(song.get("favorite")), animate=False)
+
+    def _setTint(self, color):
+        self.tintColor = color
+        self.update()
+
+    def _onBass(self, bass):
+        glow = bass if settings.get("fxMicro") else 0.0
+        if abs(glow - self.coverGlow) > 0.02 or (glow == 0 and self.coverGlow):
+            self.coverGlow = glow
+            self.update(self.coverLabel.geometry().translated(self.coverLabel.parentWidget().pos()).adjusted(-14, -14, 14, 14))
+
+    def setCoverTint(self, coverPath):
+        if not settings.get("fxCoverColors"):
+            self.tintFader.fadeTo(None)
+            return
+        self.tintFader.fadeTo(dominantColor(coverPath))
+
+    def applyEffectSettings(self):
+        self.miniVisualizer.setVisible(bool(settings.get("fxVisualizer")))
+        self.miniVisualizer.refreshRunning()
+        song = self.player.currentSong()
+        self.setCoverTint(song.get("cover") if song else None)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.tintColor is None and self.coverGlow <= 0.01:
+            return
+        from PySide6.QtGui import QLinearGradient
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if self.tintColor is not None:
+            gradient = QLinearGradient(0, 0, self.width() * 0.6, 0)
+            start = QColor(self.tintColor)
+            start.setAlpha(150)
+            end = QColor(self.tintColor)
+            end.setAlpha(0)
+            gradient.setColorAt(0, start)
+            gradient.setColorAt(1, end)
+            painter.fillRect(self.rect(), gradient)
+        if self.coverGlow > 0.01:
+            rect = self.coverLabel.geometry().translated(self.coverLabel.parentWidget().pos())
+            glow = QColor(self.tintColor or theme.ACCENT)
+            for step in range(4):
+                glow.setAlphaF(min(1.0, self.coverGlow) * 0.22 * (4 - step) / 4)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(glow)
+                spread = 3 + step * 3
+                painter.drawRoundedRect(rect.adjusted(-spread, -spread, spread, spread), 6 + spread, 6 + spread)
+        painter.end()
 
     def onLoadingChanged(self, loading):
         song = self.player.currentSong()
@@ -353,7 +418,10 @@ class PlayerBar(QFrame):
         elif song:
             self.artistLabel.setText(song.get("artist") or "Artista sconosciuto")
 
-    def setFavorite(self, isFavorite):
+    def setFavorite(self, isFavorite, animate=True):
+        if animate and isFavorite and not self.favoriteState:
+            heartBurst(self.favoriteButton)
+        self.favoriteState = isFavorite
         self.favoriteButton.setIcon(theme.icon("heartFill" if isFavorite else "heart", theme.ACCENT if isFavorite else theme.SUBTEXT, 16))
         self.favoriteButton.setToolTip("Rimuovi dai preferiti" if isFavorite else "Salva nei preferiti")
 

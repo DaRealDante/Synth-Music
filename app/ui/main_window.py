@@ -8,7 +8,7 @@ import time
 from PySide6.QtCore import QByteArray, QEvent, QSize, Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QInputDialog, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QStackedWidget, QSystemTrayIcon, QToolButton, QVBoxLayout,
     QWidget,
 )
@@ -20,6 +20,7 @@ from ..downloader import DownloadManager
 from ..media_keys import MediaSession
 from ..session_link import parseCode
 from ..playlist_sync import SharedPlaylists
+from . import effects
 from ..session_link import linkFor
 from ..together import TogetherController
 from ..player import Player
@@ -33,7 +34,7 @@ from .video_controller import BackdropWidget, VideoController
 from .now_playing import NowPlayingPanel
 from .player_bar import PlayerBar
 from .song_table import SONG_MIME
-from .views import DownloadsPage, FavoritesPage, HomePage, LibraryPage, PlaylistPage, QueuePage, SearchPage
+from .views import DownloadsPage, FavoritesPage, HomePage, LibraryPage, PlaylistPage, QueuePage, RecentPage, SearchPage
 
 
 def collectAudioFiles(paths):
@@ -127,6 +128,8 @@ class MainWindow(QMainWindow):
         self.downloads.songDownloaded.connect(self._onSongDownloaded)
         self.downloads.videoDownloaded.connect(self._onVideoDownloaded)
         self.pendingOrder = {}
+        self.videoStreams = {}
+        self.videoResolving = set()
         self.lyricsJobs = set()
         self.lyricsRetries = {}
         self.lyricsPool = QThreadPool(self)
@@ -189,8 +192,11 @@ class MainWindow(QMainWindow):
         self.pages.setObjectName("pages")
         self.homePage = HomePage(self)
         self.searchPage = SearchPage(self)
+        from .discover_page import DiscoverPage
+        self.discoverPage = DiscoverPage(self)
         self.libraryPage = LibraryPage(self)
         self.favoritesPage = FavoritesPage(self)
+        self.recentPage = RecentPage(self)
         self.playlistPage = PlaylistPage(self)
         self.downloadsPage = DownloadsPage(self)
         self.queuePage = QueuePage(self)
@@ -199,8 +205,8 @@ class MainWindow(QMainWindow):
         self.pageMap = {
             "equalizer": self.equalizerPage,
             "nowplaying": self.nowPlayingPage,
-            "home": self.homePage, "search": self.searchPage, "library": self.libraryPage,
-            "favorites": self.favoritesPage, "playlist": self.playlistPage, "downloads": self.downloadsPage,
+            "home": self.homePage, "search": self.searchPage, "discover": self.discoverPage, "library": self.libraryPage,
+            "favorites": self.favoritesPage, "recent": self.recentPage, "playlist": self.playlistPage, "downloads": self.downloadsPage,
             "queue": self.queuePage,
         }
         for page in self.pageMap.values():
@@ -259,6 +265,7 @@ class MainWindow(QMainWindow):
         self.player.playingChanged.connect(self._onPlayingChanged)
         self.player.songStarted.connect(self.database.registerPlay)
         self.player.songStarted.connect(self._autoLyricsOnPlay)
+        self.player.songStarted.connect(lambda songId: self.pages.currentWidget() is self.recentPage and self.recentPage.refresh())
         self.player.playbackError.connect(lambda message: self.showStatus(message, 5000))
 
         self.history = []
@@ -270,6 +277,16 @@ class MainWindow(QMainWindow):
         self.navigate("home")
         self._registerMediaKeys()
         QTimer.singleShot(1500, self.sharedPlaylists.start)
+        self.discordPresence = None
+        self.discordTimer = QTimer(self)
+        self.discordTimer.setSingleShot(True)
+        self.discordTimer.setInterval(800)
+        self.discordTimer.timeout.connect(self._pushDiscordPresence)
+        for signal in (self.player.songChanged, self.player.playingChanged, self.player.seeked, self.player.effectsApplied):
+            signal.connect(lambda *args: self.discordTimer.start())
+        self.together.effectsChanged.connect(lambda *args: self.discordTimer.start())
+        self.applyDiscordSetting()
+        self.applyEffectSettings()
         QTimer.singleShot(8000, self.checkEngineUpdate)
         QTimer.singleShot(12000, lambda: self.checkAppUpdate(manual=False))
         moreMenu = self.playerBar.moreButton.menu()
@@ -277,6 +294,8 @@ class MainWindow(QMainWindow):
         moreMenu.addAction(theme.icon("refresh"), "Controlla aggiornamenti", lambda: self.checkAppUpdate(manual=True))
         QApplication.instance().installEventFilter(self)
         QApplication.instance().applicationStateChanged.connect(lambda state: self._updateVideoSuspend())
+        QApplication.instance().applicationStateChanged.connect(
+            lambda state: state == Qt.ApplicationActive and QTimer.singleShot(300, self.updateAmbient))
         self.updateAmbient()
 
     # ---------- layout ----------
@@ -314,7 +333,7 @@ class MainWindow(QMainWindow):
         topLayout.addLayout(logoRow)
         topLayout.addSpacing(6)
         self.navButtons = {}
-        for key, text, iconName in (("home", "Home", "home"), ("search", "Cerca", "search"),
+        for key, text, iconName in (("home", "Home", "home"), ("search", "Cerca", "search"), ("discover", "Scopri", "star"),
                                     ("nowplaying", "In riproduzione", "mic"), ("equalizer", "Equalizzatore", "eq")):
             topLayout.addWidget(self._navButton(key, text, iconName))
         layout.addWidget(topBox)
@@ -325,6 +344,7 @@ class MainWindow(QMainWindow):
         libraryLayout.setContentsMargins(10, 10, 10, 10)
         libraryLayout.setSpacing(2)
         for key, text, iconName in (("library", "La tua libreria", "library"), ("favorites", "Brani che ti piacciono", "heartFill"),
+                                    ("recent", "Recenti", "clock"),
                                     ("downloads", "Download", "download"), ("queue", "Coda", "queue")):
             libraryLayout.addWidget(self._navButton(key, text, iconName))
         playlistHeader = QHBoxLayout()
@@ -375,7 +395,7 @@ class MainWindow(QMainWindow):
             page.refresh()
         current = self.player.currentSong()
         page.setCurrent(current.get("id") if current else None, self.player.isPlaying())
-        self.pages.setCurrentWidget(page)
+        effects.switchPage(self.pages, page)
         for navKey, button in self.navButtons.items():
             button.setChecked(navKey == key)
         if key != "playlist":
@@ -594,8 +614,7 @@ class MainWindow(QMainWindow):
             menu.addAction(theme.icon("download"), "Scarica sul PC", lambda: self.downloadStreamSongs(streamSongs))
         if single:
             menu.addAction(theme.icon("loop"), "Loop A-B...", lambda: self._openLoopFor(single))
-            if not streamSongs:
-                menu.addAction(theme.icon("cut"), "Taglia audio...", lambda: self.openCutDialog(single))
+            menu.addAction(theme.icon("cut"), "Taglia audio...", lambda: self.openCutDialog(single))
             menu.addAction(theme.icon("edit"), "Modifica informazioni...", lambda: self.editSong(single))
             if not streamSongs:
                 menu.addAction(theme.icon("folder"), "Mostra nella cartella", lambda: showInFolder(single["path"]))
@@ -645,9 +664,7 @@ class MainWindow(QMainWindow):
         box.setWindowTitle(APP_NAME)
         box.setIcon(QMessageBox.Question)
         box.setText(f"Eliminare {len(songs)} brani dalla libreria?" if len(songs) > 1 else f"Eliminare \"{songs[0].get('title')}\" dalla libreria?")
-        box.setInformativeText("Verranno rimossi anche da tutte le playlist e i loop salvati.")
-        deleteFilesCheck = QCheckBox("Elimina anche i file dal disco")
-        box.setCheckBox(deleteFilesCheck)
+        box.setInformativeText("Verranno rimossi anche da tutte le playlist e i loop salvati. I file audio vanno nel Cestino.")
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         box.setDefaultButton(QMessageBox.No)
         if box.exec() != QMessageBox.Yes:
@@ -656,30 +673,23 @@ class MainWindow(QMainWindow):
         self.player.removeSongIds(songIds)
         self.database.deleteSongs(songIds)
         failed = 0
-        if deleteFilesCheck.isChecked():
-            self.videoController.unload()
-            for song in songs:
-                if isStreamPath(song.get("path")):
-                    continue
-                try:
-                    os.remove(song["path"])
-                except OSError:
-                    failed += 1
-                if song.get("videoPath") and os.path.normpath(song["videoPath"]).startswith(os.path.normpath(settings.musicDir())):
-                    try:
-                        os.remove(song["videoPath"])
-                    except OSError:
-                        pass
+        self.videoController.unload()
+        for song in songs:
+            if not isStreamPath(song.get("path")) and os.path.exists(song["path"]) and not _removeToTrash(song["path"]):
+                failed += 1
+            if song.get("videoPath") and os.path.normpath(song["videoPath"]).startswith(os.path.normpath(settings.musicDir())):
+                _removeToTrash(song["videoPath"])
         self.refreshPlaylists()
         self.refreshCurrentPage()
-        self.showStatus(f"Eliminati {len(songs)} brani" + (f" ({failed} file non eliminati)" if failed else ""))
+        self.showStatus(f"Eliminati {len(songs)} brani" + (f" ({failed} file non spostati nel Cestino: sono rimasti dove erano)" if failed else ""))
 
     # ---------- cut ----------
     def openCutDialog(self, song, initialSelection=None):
         if not song:
             self.showStatus("Nessuna canzone selezionata")
             return
-        if not self.requireFile(song):
+        if isStreamPath(song.get("path")):
+            self.withLocalAudio(song, self.openCutDialog)
             return
         if not os.path.isfile(song["path"]):
             self.showStatus("File non trovato")
@@ -715,14 +725,20 @@ class MainWindow(QMainWindow):
             if isCurrent:
                 self.player.mediaPlayer.stop()
                 self.player.mediaPlayer.setSource(QUrl())
+            targetPath = song["path"]
+            if song.get("streamOrigin"):
+                baseName = audio_tools.safeFileName(f"{song.get('artist')} - {song.get('title')}" if song.get("artist") else song.get("title"))
+                targetPath = audio_tools.uniquePath(settings.musicDir(), baseName, os.path.splitext(outputPath)[1] or ".mp3")
             try:
-                os.replace(outputPath, song["path"])
+                os.replace(outputPath, targetPath)
             except OSError as error:
                 QMessageBox.critical(self, APP_NAME, f"Impossibile sostituire il file:\n{error}")
                 return
+            song = dict(song, path=targetPath)
             metadata.writeMp3Tags(song["path"], song.get("title"), song.get("artist"), song.get("album"), song.get("cover"))
             duration = metadata.readTags(song["path"])["duration"]
-            self.database.updateSong(song["id"], duration=duration, **lyricsFields)
+            pathFields = {"path": targetPath, "source": "cut", "hidden": 0} if song.get("streamOrigin") else {}
+            self.database.updateSong(song["id"], duration=duration, **pathFields, **lyricsFields)
             for loopData in self.database.loops(song["id"]):
                 if loopData["startMs"] >= duration * 1000:
                     self.database.deleteLoop(loopData["id"])
@@ -913,7 +929,97 @@ class MainWindow(QMainWindow):
         else:
             self.togetherLabel.setText(f"Stanza {self.together.code} · aspetto i tuoi amici (Gestisci → Copia link)")
 
+    # ---------- effetti ----------
+    def applyEffectSettings(self):
+        engine = self.player.mediaPlayer
+        engine.fadeEnabled = bool(settings.get("fxSongFade"))
+        engine.spectrumEnabled = bool(settings.get("fxVisualizer") or settings.get("fxMicro"))
+        self.playerBar.applyEffectSettings()
+        self.nowPlayingPage.applyEffectSettings()
+
+    # ---------- discord ----------
+    def applyDiscordSetting(self):
+        from ..config import DISCORD_CLIENT_ID
+        from ..discord_presence import DiscordPresence
+        clientId = (settings.get("discordClientId") or DISCORD_CLIENT_ID or "").strip()
+        wanted = bool(settings.get("discordPresence")) and bool(clientId)
+        if self.discordPresence is not None and (not wanted or self.discordPresence.clientId != clientId):
+            self.discordPresence.stop()
+            self.discordPresence = None
+        if wanted and self.discordPresence is None:
+            self.discordPresence = DiscordPresence(clientId)
+            self.discordPresence.start()
+            self.discordTimer.start()
+
+    def _pushDiscordPresence(self):
+        if self.discordPresence is None:
+            return
+        from ..discord_presence import buildActivity
+        song = self.player.currentSong()
+        playing = self.player.isPlaying() or (self.player.loading and self.player.loadAutoplay)
+        durationMs = self.player.duration() or int((song or {}).get("duration") or 0) * 1000
+        self.discordPresence.update(buildActivity(song, self.player.position(), durationMs, playing, self.player.playbackRate()))
+
+    # ---------- scopri ----------
+    def discoveredSong(self, track):
+        """Library row for a suggested track: the song you already have, otherwise a hidden streaming copy."""
+        from .. import discover
+        from .discover_page import cachedRemoteImage, loadRemoteImage
+        song = self.database.findSongByUrl(track["url"]) if track.get("url") else None
+        if song is None:
+            song = self.database.findSong(track["title"], discover.mainArtist(track.get("artist")))
+        if song is None:
+            songId = self.database.addStreamSong(discover.playTarget(track), track["title"], track.get("artist") or "",
+                                                 track.get("album") or "", track.get("duration") or 0,
+                                                 cachedRemoteImage(track.get("image")), hidden=True)
+            song = self.database.getSong(songId)
+            if not song.get("cover") and track.get("image"):
+                def onImage(path, songId=songId):
+                    if not (self.database.getSong(songId) or {}).get("cover"):
+                        self.database.updateSong(songId, cover=path)
+                        fresh = self.database.getSong(songId)
+                        if fresh:
+                            self.broadcastSong(fresh)
+                loadRemoteImage(track["image"], onImage)
+        return song
+
+    def playDiscovered(self, tracks, index):
+        songs = [self.discoveredSong(track) for track in tracks]
+        self.playSongs(songs, index)
+
+    def queueDiscovered(self, tracks):
+        self.player.addToQueue([self.discoveredSong(track) for track in tracks])
+        self.showStatus("Aggiunto alla coda")
+
+    def saveDiscovered(self, track):
+        song = self.discoveredSong(track)
+        self.database.updateSong(song["id"], hidden=0)
+        self.broadcastSong(self.database.getSong(song["id"]))
+        self.showStatus(f"\"{song['title']}\" salvata nella libreria (streaming)")
+
     # ---------- streaming ----------
+    def withLocalAudio(self, song, action):
+        """Cut / effects on a streaming song: its audio is fetched first (temporarily), the result is a real file."""
+        if not isStreamPath(song.get("path")):
+            action(song)
+            return
+        target = song["path"][len(STREAM_PREFIX):]
+        if target.startswith("roomfile:"):
+            cachedPath = self.together.roomFilePaths.get(target[len("roomfile:"):].partition("|")[0])
+            if cachedPath and os.path.isfile(cachedPath):
+                action(dict(song, path=cachedPath, streamOrigin=song["path"]))
+            else:
+                self.showStatus("Aspetta che la canzone dell'amico sia arrivata, poi riprova", 4000)
+            return
+        self.showStatus("Preparo la canzone (la scarico solo per modificarla)...", 120000)
+
+        def onReady(path):
+            self.showStatus("Pronta", 1500)
+            action(dict(song, path=path, streamOrigin=song["path"]))
+
+        runInBackground(downloader.downloadTempAudio, song["path"][len(STREAM_PREFIX):], onFinished=onReady,
+                        onError=lambda message: self.showStatus(f"Non riesco a preparare la canzone: {message[:100]}", 5000))
+
     def requireFile(self, song):
         if song and isStreamPath(song.get("path")):
             self.showStatus("Questa canzone è in streaming: scaricala prima (menu → Scarica sul PC)", 4000)
@@ -1044,12 +1150,15 @@ class MainWindow(QMainWindow):
         self.player.setReverb(effects["reverbWet"], effects["reverbSize"])
         self.playerBar.setEffectsIndicator(effects)
 
-    def exportWithEffects(self):
+    def exportWithEffects(self, localSong=None):
         current = self.player.currentSong()
         if not current:
             return
-        song = self.database.getSong(current["id"])
-        if not song or not self.requireFile(song):
+        song = localSong or self.database.getSong(current["id"])
+        if not song:
+            return
+        if isStreamPath(song.get("path")):
+            self.withLocalAudio(song, lambda prepared: self.exportWithEffects(prepared))
             return
         effects = self.songEffects(song)
         if abs(effects["rate"] - 1.0) < 0.005 and effects["reverbWet"] < 0.005:
@@ -1141,12 +1250,49 @@ class MainWindow(QMainWindow):
         self.navigate("nowplaying")
         self.nowPlayingPage.setMode("lyrics")
 
+    def videoSourceFor(self, song):
+        """Saved video file, otherwise the YouTube video in streaming (resolved in background; None until ready)."""
+        if not song:
+            return None
+        fresh = (self.database.getSong(song["id"]) if song.get("id") else None) or song
+        videoPath = fresh.get("videoPath")
+        if videoPath and os.path.isfile(videoPath):
+            return videoPath
+        if not settings.get("streamVideo") or not fresh.get("videoAuto", 1):
+            return None
+        path = str(fresh.get("path") or "")
+        target = fresh.get("videoUrl") or fresh.get("url") or (path[len(STREAM_PREFIX):] if isStreamPath(path) else None)
+        if not target:
+            return None
+        key = f"{settings.get('videoQuality')}:{target}"
+        cached = self.videoStreams.get(key)
+        if cached and time.time() - cached[0] < (4 * 3600 if cached[1] else 600):
+            return cached[1]
+        if key not in self.videoResolving and self._activeForVideo():
+            self.videoResolving.add(key)
+            runInBackground(downloader.resolveVideoStream, target, int(settings.get("videoQuality") or 720),
+                            onFinished=lambda url: self._onVideoStreamResolved(key, url),
+                            onError=lambda message: self._onVideoStreamResolved(key, None))
+        return None
+
+    def _activeForVideo(self):
+        return QApplication.instance().applicationState() == Qt.ApplicationActive and not self.isMinimized()
+
+    def videoStreamLoading(self, song):
+        return any(key.endswith(":" + str(target)) for key in self.videoResolving
+                   for target in (song.get("videoUrl"), song.get("url"), str(song.get("path") or "")[len(STREAM_PREFIX):]) if target)
+
+    def _onVideoStreamResolved(self, key, url):
+        self.videoResolving.discard(key)
+        self.videoStreams[key] = (time.time(), url)
+        self.updateAmbient()
+        self.nowPlayingPage._loadVideo()
+
     def updateAmbient(self):
         current = self.player.currentSong()
         song = self.database.getSong(current["id"]) if current and current.get("id") else None
-        videoPath = song.get("videoPath") if song else None
-        wanted = settings.get("ambientMode") != "off" and bool(videoPath) and os.path.isfile(videoPath) \
-            and bool(song.get("videoAuto", 1))
+        videoPath = self.videoSourceFor(song) if song and settings.get("ambientMode") != "off" else None
+        wanted = settings.get("ambientMode") != "off" and bool(videoPath) and bool(song.get("videoAuto", 1))
         if wanted:
             self.videoController.request("backdrop", videoPath)
         else:
@@ -1600,7 +1746,28 @@ class MainWindow(QMainWindow):
     # ---------- misc ----------
     def openSettings(self):
         dialog = SettingsDialog(self)
-        dialog.exec()
+        if dialog.exec() == SettingsDialog.Accepted:
+            self.applyDiscordSetting()
+            self.applyEffectSettings()
+            self.updateAmbient()
+            self.nowPlayingPage._loadVideo()
+            if dialog.restartForColors:
+                answer = QMessageBox.question(self, APP_NAME, "Riavviare ora Synth Music per applicare i nuovi colori?\n"
+                                                              "Riparte dalla stessa canzone.")
+                if answer == QMessageBox.Yes:
+                    self.restartApp()
+
+    def restartApp(self):
+        self.restartRequested = True
+        self.close()
+
+    def _launchRestart(self):
+        from PySide6.QtCore import QProcess
+        if getattr(sys, "frozen", False):
+            program, arguments = sys.executable, []
+        else:
+            program, arguments = sys.executable, [os.path.join(resourceDir(), "main.py")]
+        QProcess.startDetached(program, arguments + ["--restarted"])
 
     def showStatus(self, text, duration=2500):
         self.toast.setText(text)
@@ -1770,6 +1937,7 @@ class MainWindow(QMainWindow):
         if self.downloads.activeCount():
             answer = QMessageBox.question(self, APP_NAME, "Ci sono download in corso. Chiudere comunque?")
             if answer != QMessageBox.Yes:
+                self.restartRequested = False
                 event.ignore()
                 return
         current = self.player.currentSong()
@@ -1789,6 +1957,8 @@ class MainWindow(QMainWindow):
             self.tray.hide()
         self.together.leaveRoom()
         self.sharedPlaylists.stopAll()
+        if self.discordPresence is not None:
+            self.discordPresence.stop()
         if getattr(self, "mediaSession", None) is not None:
             self.mediaSession.shutdown()
         if sys.platform == "win32" and self.mediaHotkeys:
@@ -1804,6 +1974,8 @@ class MainWindow(QMainWindow):
         self.videoController.unload()
         self.player.mediaPlayer.stop()
         self.player.shutdown()
+        if getattr(self, "restartRequested", False):
+            self._launchRestart()
         for leftover in os.listdir(TEMP_DIR):
             try:
                 os.remove(os.path.join(TEMP_DIR, leftover))
@@ -1811,6 +1983,15 @@ class MainWindow(QMainWindow):
                 pass
         event.accept()
         QApplication.instance().quit()
+
+
+def _removeToTrash(path):
+    """Deleted songs go to the Recycle Bin (recoverable), or are removed if the bin isn't available."""
+    from PySide6.QtCore import QFile
+    try:
+        return bool(QFile.moveToTrash(path))
+    except Exception:
+        return False
 
 
 def showInFolder(path):

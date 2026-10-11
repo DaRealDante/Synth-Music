@@ -1,4 +1,4 @@
-# Synth Music v1.7.0
+# Synth Music v1.8.0
 
 ## Installare / aggiornare (tu)
 Doppio click su **`INSTALLA_E_AGGIORNA.bat`**. Fa tutto da solo:
@@ -57,6 +57,21 @@ Il motore YouTube (yt-dlp) si aggiorna da solo una volta al giorno: non serve ri
 - Impostazioni → **"Non scaricare: aggiungi le canzoni solo in streaming"**: il bottone Scarica diventa *Aggiungi* (vale anche per playlist YouTube e Spotify)
 - Le canzoni in streaming hanno "Streaming ·" sotto il titolo. Menu → *Scarica sul PC*; al contrario, su una canzone scaricata *Solo streaming (elimina il file)*
 - Taglia audio ed "Esporta con effetti" richiedono il file: scarica prima la canzone
+
+## Novità 1.8
+- **Scopri** (menu a sinistra): consigliati per te, "Perché hai ascoltato…", artisti che potrebbero piacerti, i tuoi artisti, novità, classifica mondiale e Top Italia. Click su un artista → la sua pagina. Le canzoni si provano in streaming; ＋ / tasto destro → salva, coda, playlist, scarica
+- **Animazioni** (tutte disattivabili in Impostazioni → Animazioni): transizioni tra pagine, popup morbidi, card che si illuminano, play che rimbalza, colori dalla copertina, visualizer a ritmo, cuore che esplode al like, copertina che pulsa sui bassi, dissolvenza tra canzoni
+- **Colori personalizzabili**: Impostazioni → Aspetto (color picker + temi pronti), l'app si riavvia da sola
+- **Stato Discord**: mostra cosa ascolti con copertina e barra del tempo (Impostazioni → Generale)
+- **mp3 personali in stanza**: se metti una canzone tua che non c'è su YouTube, gli amici la sentono lo stesso (upload criptato temporaneo, cancellato dopo 1 ora)
+- Taglia audio ed "Esporta con effetti" funzionano anche sulle canzoni in streaming (la scarica solo per modificarla; il risultato è un file)
+- Eliminare una canzone dalla libreria manda anche il file nel Cestino
+
+## Novità 1.7.1
+- **Streaming di default**: le canzoni da YouTube si aggiungono senza scaricarle (menu → *Scarica sul PC* per averle offline; si cambia in Impostazioni)
+- **Video in streaming**: il video appare (sfondo e "In riproduzione") anche se non è scaricato, nella qualità scelta in Impostazioni
+- Nuova categoria **Recenti**: le ultime 15 canzoni ascoltate, anche quelle messe dagli amici
+- Fix: errore con un link lunghissimo all'avvio di una canzone in streaming. Ora lo streaming scarica a blocchi come yt-dlp, mostra errori leggibili e, se YouTube lo rifiuta, usa un download temporaneo automatico
 
 ## Novità 1.7
 - **Ascolta insieme** con più persone, profili con nome e foto

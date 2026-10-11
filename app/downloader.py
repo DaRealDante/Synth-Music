@@ -108,6 +108,58 @@ def resolveStream(target, useCache=True):
     return result
 
 
+STREAM_CACHE_FILES = 8
+
+
+def resolveVideoStream(target, height=720):
+    """Direct URL of the song's video (no audio needed: the app plays it muted) at the chosen quality."""
+    import yt_dlp
+    options = _baseOptions()
+    options.update({
+        "format": (f"bestvideo[height<={height}][ext=mp4][vcodec^=avc1]/bestvideo[height<={height}][ext=mp4]/"
+                   f"best[height<={height}][ext=mp4]/bestvideo[height<={height}]/best[height<={height}]/best"),
+        "noplaylist": True,
+    })
+    with yt_dlp.YoutubeDL(options) as youtube:
+        info = youtube.extract_info(target, download=False)
+    if info.get("entries") is not None:
+        entries = [entry for entry in (info.get("entries") or []) if entry]
+        if not entries:
+            raise RuntimeError("Nessun video trovato")
+        info = entries[0]
+    streamUrl = info.get("url") or ((info.get("requested_formats") or [{}])[0].get("url"))
+    if not streamUrl:
+        raise RuntimeError("Video non trovato")
+    return streamUrl
+
+
+def downloadTempAudio(target):
+    """Last resort when streaming is refused: yt-dlp downloads the audio to a temporary cache (not to the library)."""
+    import hashlib
+    import yt_dlp
+    cacheDir = os.path.join(TEMP_DIR, "stream_cache")
+    os.makedirs(cacheDir, exist_ok=True)
+    baseName = hashlib.sha1(target.encode("utf-8")).hexdigest()[:16]
+    existing = [path for path in glob.glob(os.path.join(cacheDir, baseName + ".*")) if not path.endswith(".part")]
+    if existing:
+        return existing[0]
+    options = _baseOptions()
+    options.update({"format": "bestaudio[ext=m4a]/bestaudio/best", "noplaylist": True,
+                    "outtmpl": os.path.join(cacheDir, baseName + ".%(ext)s")})
+    with yt_dlp.YoutubeDL(options) as youtube:
+        youtube.extract_info(target, download=True)
+    files = [path for path in glob.glob(os.path.join(cacheDir, baseName + ".*")) if not path.endswith(".part")]
+    if not files:
+        raise RuntimeError("download temporaneo fallito")
+    cached = sorted(glob.glob(os.path.join(cacheDir, "*")), key=os.path.getmtime, reverse=True)
+    for oldPath in cached[STREAM_CACHE_FILES:]:
+        try:
+            os.remove(oldPath)
+        except OSError:
+            pass
+    return files[0]
+
+
 def forgetStream(target):
     with _streamCacheLock:
         _streamCache.pop((target or "").strip(), None)

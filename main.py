@@ -17,7 +17,7 @@ from app.updater import activateDownloadedEngine
 activateDownloadedEngine()
 
 from app.session_link import parseCode
-from app.single_instance import InstanceServer, sendToRunning
+from app.single_instance import InstanceServer, sendToRunning, waitForPreviousInstance
 from app.ui import theme
 from app.ui.main_window import MainWindow
 
@@ -43,7 +43,9 @@ def main():
     application.setStyleSheet(theme.STYLESHEET)
     application.setFont(QFont("Segoe UI", 10))
     linkArgument = next((argument for argument in sys.argv[1:] if parseCode(argument)), None)
-    if sendToRunning(linkArgument or "show"):
+    if "--restarted" in sys.argv:
+        waitForPreviousInstance()
+    elif sendToRunning(linkArgument or "show"):
         sys.exit(0)
     instanceServer = InstanceServer(parent=application)
     instanceServer.listen()

@@ -14,7 +14,32 @@ from ..lyrics import parseSynced
 from . import theme
 from .player_bar import ClickSlider
 from .video_controller import FrameView
+from .effects import ColorFader, Visualizer
 from .views import ElidedLabel, Page, _iconButton, _label
+
+
+class GradientWidget(QWidget):
+    """Background of "In riproduzione": vertical gradient from the cover colour (painted, so it can animate cheaply)."""
+
+    def __init__(self):
+        super().__init__()
+        self.color = QColor("#3A3A3A")
+
+    def setColor(self, color):
+        self.color = QColor(color) if color is not None else QColor("#3A3A3A")
+        self.update()
+
+    def paintEvent(self, event):
+        from PySide6.QtGui import QLinearGradient, QPainterPath
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        gradient = QLinearGradient(0, 0, 0, self.height())
+        gradient.setColorAt(0, self.color)
+        gradient.setColorAt(1, self.color.darker(260))
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), 10, 10)
+        painter.fillPath(path, gradient)
+        painter.end()
 
 MODE_LYRICS, MODE_VIDEO, MODE_BOTH = "lyrics", "video", "both"
 
@@ -252,7 +277,7 @@ class VideoPane(QWidget):
         self.controller.stateChanged.connect(self._onControllerState)
 
     def setVideo(self, path):
-        if path and os.path.isfile(path):
+        if path and (str(path).startswith(("http://", "https://")) or os.path.isfile(path)):
             self.currentPath = path
             self.controller.request("pane", path)
             self.stack.setCurrentIndex(0)
@@ -396,9 +421,8 @@ class NowPlayingView(Page):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        self.content = QWidget()
+        self.content = GradientWidget()
         self.content.setObjectName("nowContent")
-        self.content.setAttribute(Qt.WA_StyledBackground, True)
         outer.addWidget(self.content)
         layout = QVBoxLayout(self.content)
         layout.setContentsMargins(24, 16, 24, 18)
@@ -465,6 +489,13 @@ class NowPlayingView(Page):
         body.addWidget(self.videoPane, 6)
         body.addWidget(self.lyricsView, 5)
         layout.addLayout(body, 1)
+        self.visualizer = Visualizer(self.window.player, bars=32)
+        self.visualizer.setFixedHeight(54)
+        self.visualizer.setColor(QColor(255, 255, 255, 200))
+        self.visualizer.setVisible(bool(settings.get("fxVisualizer")))
+        layout.addWidget(self.visualizer)
+        self.window.player.playingChanged.connect(lambda playing: self.visualizer.refreshRunning())
+        self.backgroundFader = ColorFader(self.content.setColor, self)
 
         self.syncTimer = QTimer(self)
         self.syncTimer.setInterval(200)
@@ -526,12 +557,15 @@ class NowPlayingView(Page):
 
     def _setBackground(self, coverPath):
         self.backgroundColor = dominantColor(coverPath)
-        top = self.backgroundColor.name()
-        bottom = self.backgroundColor.darker(260).name()
-        self.content.setStyleSheet(
-            f"QWidget#nowContent {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {top}, stop:1 {bottom});"
-            f" border-radius: 10px; }}"
-        )
+        if settings.get("fxCoverColors"):
+            self.backgroundFader.fadeTo(self.backgroundColor)
+        else:
+            self.backgroundFader.current = None
+            self.content.setColor(self.backgroundColor)
+
+    def applyEffectSettings(self):
+        self.visualizer.setVisible(bool(settings.get("fxVisualizer")))
+        self.visualizer.refreshRunning()
 
     def _loadLyrics(self):
         song = self.song
@@ -561,7 +595,13 @@ class NowPlayingView(Page):
         if self.window.videoPending(song["id"]):
             self.videoPane.showEmpty("Download del video in corso...")
             return
-        self.videoPane.setVideo(song.get("videoPath"))
+        source = self.window.videoSourceFor(song)
+        if source:
+            self.videoPane.setVideo(source)
+        elif self.window.videoStreamLoading(song):
+            self.videoPane.showEmpty("Carico il video in streaming...")
+        else:
+            self.videoPane.setVideo(song.get("videoPath"))
         self.videoPane.sync(self.window.player)
 
     # ---------- modes ----------
@@ -654,7 +694,7 @@ class NowPlayingView(Page):
             self.window.activateWindow()
             QTimer.singleShot(0, self._loadVideo)
         else:
-            if self.mode == MODE_LYRICS and self.song and self.song.get("videoPath"):
+            if self.mode == MODE_LYRICS and self.song and (self.song.get("videoPath") or self.window.videoSourceFor(self.song)):
                 self.setMode(MODE_VIDEO)
             layout.removeWidget(self.content)
             host.layout_.addWidget(self.content)

@@ -179,8 +179,9 @@ class Database:
     def mostPlayed(self, limit=12):
         return self._rows("SELECT * FROM songs WHERE playCount>0 AND hidden=0 ORDER BY playCount DESC LIMIT ?", (limit,))
 
-    def recentlyPlayed(self, limit=12):
-        return self._rows("SELECT * FROM songs WHERE lastPlayed IS NOT NULL AND hidden=0 ORDER BY lastPlayed DESC LIMIT ?", (limit,))
+    def recentlyPlayed(self, limit=12, includeHidden=False):
+        hiddenFilter = "" if includeHidden else " AND hidden=0"
+        return self._rows(f"SELECT * FROM songs WHERE lastPlayed IS NOT NULL{hiddenFilter} ORDER BY lastPlayed DESC LIMIT ?", (limit,))
 
     def searchSongs(self, text):
         likeText = f"%{text}%"

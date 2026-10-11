@@ -25,6 +25,20 @@ def sendToRunning(message, name=None):
     return True
 
 
+def waitForPreviousInstance(name=None, timeoutSeconds=15):
+    """After "Riavvia ora": wait until the old window has closed before taking its place."""
+    import time
+    deadline = time.time() + timeoutSeconds
+    while time.time() < deadline:
+        socket = QLocalSocket()
+        socket.connectToServer(name or serverName())
+        if not socket.waitForConnected(150):
+            return True
+        socket.disconnectFromServer()
+        time.sleep(0.25)
+    return False
+
+
 class InstanceServer(QObject):
     messageReceived = Signal(str)
 

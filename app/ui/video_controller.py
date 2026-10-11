@@ -7,6 +7,10 @@ from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
 from PySide6.QtWidgets import QWidget
 
 
+def isRemote(path):
+    return str(path or "").lower().startswith(("http://", "https://"))
+
+
 class VideoController(QObject):
     """One muted video player shared by the background and the "In riproduzione" page, synced to the audio."""
 
@@ -35,7 +39,7 @@ class VideoController(QObject):
 
     # ---------- clients ----------
     def request(self, client, path):
-        if path and os.path.isfile(path):
+        if path and (isRemote(path) or os.path.isfile(path)):
             self.clients[client] = path
         else:
             self.clients.pop(client, None)
@@ -58,7 +62,7 @@ class VideoController(QObject):
         self.failed = False
         self.mediaPlayer.stop()
         if wantedPath:
-            self.mediaPlayer.setSource(QUrl.fromLocalFile(os.path.abspath(wantedPath)))
+            self.mediaPlayer.setSource(QUrl(wantedPath) if isRemote(wantedPath) else QUrl.fromLocalFile(os.path.abspath(wantedPath)))
             if self.suspended:
                 self.mediaPlayer.play()
                 QTimer.singleShot(150, lambda: self.suspended and self.mediaPlayer.pause())

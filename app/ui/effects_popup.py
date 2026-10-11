@@ -167,4 +167,6 @@ class EffectsPopup(QFrame):
         self.adjustSize()
         position = anchor.mapToGlobal(anchor.rect().topLeft())
         self.move(position.x() + anchor.width() - self.width(), position.y() - self.height() - 8)
+        from .effects import popIn
+        popIn(self)
         self.show()

@@ -1,16 +1,67 @@
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QLinearGradient, QPainter, QPainterPath, QPixmap
 
-ACCENT = "#1ED760"
-ACCENT_HOVER = "#3BE477"
-BACKGROUND = "#121212"
-SIDEBAR = "#000000"
-PANEL = "#181818"
-ELEVATED = "#242424"
-HOVER = "#2A2A2A"
-TEXT = "#FFFFFF"
-SUBTEXT = "#B3B3B3"
-MUTED = "#6A6A6A"
+from ..config import settings
+
+DEFAULT_COLORS = {"accent": "#1ED760", "background": "#121212", "panel": "#181818", "sidebar": "#000000", "text": "#FFFFFF"}
+COLOR_PRESETS = {
+    "Verde (originale)": {},
+    "Viola": {"accent": "#A970FF"},
+    "Blu": {"accent": "#3D91F4"},
+    "Rosso": {"accent": "#F23F42"},
+    "Arancio": {"accent": "#FF8A1F"},
+    "Rosa": {"accent": "#FF4FA0"},
+    "Mezzanotte": {"accent": "#5B8CFF", "background": "#0F1424", "panel": "#151B2E", "sidebar": "#0A0E1A"},
+    "Bosco": {"accent": "#7BD88F", "background": "#101A14", "panel": "#15211A", "sidebar": "#09110C"},
+}
+
+
+def _mix(first, second, amount):
+    first, second = QColor(first), QColor(second)
+    return QColor(round(first.red() + (second.red() - first.red()) * amount),
+                  round(first.green() + (second.green() - first.green()) * amount),
+                  round(first.blue() + (second.blue() - first.blue()) * amount)).name().upper()
+
+
+def _luminance(color):
+    color = QColor(color)
+    return 0.2126 * color.redF() + 0.7152 * color.greenF() + 0.0722 * color.blueF()
+
+
+def resolveColors(custom):
+    """Full palette from the (partial) colours chosen by the user: derived shades always stay readable."""
+    custom = {key: value for key, value in (custom or {}).items() if key in DEFAULT_COLORS and QColor(str(value)).isValid()}
+    if not custom:
+        return {"ACCENT": "#1ED760", "ACCENT_HOVER": "#3BE477", "ACCENT_TEXT": "#000000", "BACKGROUND": "#121212",
+                "SIDEBAR": "#000000", "PANEL": "#181818", "ELEVATED": "#242424", "HOVER": "#2A2A2A", "TEXT": "#FFFFFF",
+                "SUBTEXT": "#B3B3B3", "MUTED": "#6A6A6A"}
+    colors = dict(DEFAULT_COLORS, **{key: QColor(str(value)).name().upper() for key, value in custom.items()})
+    background = colors["background"]
+    text = colors["text"]
+    if abs(_luminance(text) - _luminance(background)) < 0.45:
+        text = "#FFFFFF" if _luminance(background) < 0.5 else "#000000"
+    accent = colors["accent"]
+    return {
+        "ACCENT": accent, "ACCENT_HOVER": QColor(accent).lighter(115).name().upper(),
+        "ACCENT_TEXT": "#000000" if _luminance(accent) > 0.45 else "#FFFFFF",
+        "BACKGROUND": background, "SIDEBAR": colors["sidebar"], "PANEL": colors["panel"],
+        "ELEVATED": _mix(colors["panel"], text, 0.07), "HOVER": _mix(colors["panel"], text, 0.10),
+        "TEXT": text, "SUBTEXT": _mix(text, background, 0.30), "MUTED": _mix(text, background, 0.58),
+    }
+
+
+_palette = resolveColors(settings.get("themeColors") or {})
+ACCENT = _palette["ACCENT"]
+ACCENT_HOVER = _palette["ACCENT_HOVER"]
+ACCENT_TEXT = _palette["ACCENT_TEXT"]
+BACKGROUND = _palette["BACKGROUND"]
+SIDEBAR = _palette["SIDEBAR"]
+PANEL = _palette["PANEL"]
+ELEVATED = _palette["ELEVATED"]
+HOVER = _palette["HOVER"]
+TEXT = _palette["TEXT"]
+SUBTEXT = _palette["SUBTEXT"]
+MUTED = _palette["MUTED"]
 
 STYLESHEET = f"""
 * {{ font-family: "Segoe UI Variable Text", "Segoe UI", "Inter", sans-serif; font-size: 10pt; color: {TEXT}; outline: none; }}
@@ -30,7 +81,7 @@ QPushButton {{ background: {ELEVATED}; border: none; border-radius: 16px; paddin
 QPushButton:hover {{ background: {HOVER}; }}
 QPushButton:pressed {{ background: #1A1A1A; }}
 QPushButton:disabled {{ color: {MUTED}; }}
-QPushButton#accent {{ background: {ACCENT}; color: #000; }}
+QPushButton#accent {{ background: {ACCENT}; color: {ACCENT_TEXT}; }}
 QPushButton#accent:hover {{ background: {ACCENT_HOVER}; }}
 QPushButton#outline {{ background: transparent; border: 1px solid {MUTED}; }}
 QPushButton#outline:hover {{ border-color: {TEXT}; }}
@@ -46,7 +97,7 @@ QToolButton#bigPlay {{ background: {ACCENT}; border-radius: 28px; }}
 QToolButton#bigPlay:hover {{ background: {ACCENT_HOVER}; }}
 
 QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
-    background: {ELEVATED}; border: 1px solid transparent; border-radius: 6px; padding: 6px 10px; selection-background-color: {ACCENT}; selection-color: #000;
+    background: {ELEVATED}; border: 1px solid transparent; border-radius: 6px; padding: 6px 10px; selection-background-color: {ACCENT}; selection-color: {ACCENT_TEXT};
 }}
 QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border: 1px solid {MUTED}; }}
 QLineEdit#searchBox {{ border-radius: 20px; padding: 9px 16px; font-size: 10.5pt; background: {ELEVATED}; }}
@@ -123,7 +174,7 @@ ICON_CODES = {
     "close": ("", "✕"), "check": ("", "✓"), "panel": ("", "▣"), "speed": ("", "⏩"),
     "timer": ("", "⏲"), "file": ("", "📄"), "refresh": ("", "⟳"), "back": ("", "←"),
     "link": ("", "🔗"), "mic": ("", "🎤"), "flagA": ("", "A"), "info": ("", "ⓘ"), "eq": ("\uE9E9", "≋"),
-    "cloud": ("\uE753", "☁"), "people": ("\uE716", "👥"), "person": ("\uE77B", "👤"), "share": ("\uE72D", "⇪"),
+    "cloud": ("\uE753", "☁"), "people": ("\uE716", "👥"), "person": ("\uE77B", "👤"), "share": ("\uE72D", "⇪"), "star": ("\uE734", "★"),
 }
 
 _iconCache = {}

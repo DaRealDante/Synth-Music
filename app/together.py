@@ -1,13 +1,22 @@
+import hashlib
+import os
 import random
+import time
 import uuid
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from .config import settings
+from .config import TEMP_DIR, settings
+from .database import isStreamPath
+from .room_files import RoomFileCache, encryptFile, uploadTemporary, validRoomFile
+from .workers import runInBackground
 from .session_link import Link, makeCode
 from .together_sync import ClockSync, expectedPosition, isNewer, nowMs, trackFromSong
 
 DRIFT_TOLERANCE_MS = 700
+ROOM_FILE_WAIT_SECONDS = 30
+FILE_ID_CACHE_SECONDS = 120
+REUPLOAD_AFTER_SECONDS = 50 * 60
 MAX_SHARED_QUEUE = 400
 STATE_WAIT_MS = 4000
 
@@ -83,6 +92,22 @@ class TogetherController(QObject):
         self.waitTimer = QTimer(self)
         self.waitTimer.setSingleShot(True)
         self.waitTimer.timeout.connect(self._onStateWaitTimeout)
+        self.fileInfos = {}
+        self.uploads = {}
+        self.failedUploads = {}
+        self.fileIdCache = {}
+        self.roomFilePaths = {}
+        self.currentRoomFile = None
+        self.roomCache = RoomFileCache(os.path.join(TEMP_DIR, "room_files"))
+        self.roomCache.cleanup()
+        self.fileTimer = QTimer(self)
+        self.fileTimer.setInterval(5 * 60 * 1000)
+        self.fileTimer.timeout.connect(self._fileMaintenance)
+        self.fileTimer.start()
+        player.roomFileResolver = self.resolveRoomFile
+        from PySide6.QtCore import QThreadPool
+        self.uploadPool = QThreadPool(self)
+        self.uploadPool.setMaxThreadCount(2)
 
         player.songChanged.connect(lambda song: self._onLocalChange())
         player.playingChanged.connect(lambda playing: self._onLocalChange())
@@ -128,7 +153,7 @@ class TogetherController(QObject):
         self.joinedAt = nowMs()
         self.waitingForState = waitForState
         self.player.skipOnError = False
-        self.link.watch(code, ["state", "msg", "presence/+"])
+        self.link.watch(code, ["state", "msg", "presence/+", "files/+"])
         self.link.setWill(code, f"presence/{self.myId()}")
         self._publishPresence()
         if self.link.running:
@@ -153,6 +178,8 @@ class TogetherController(QObject):
         self.code = None
         self.state = None
         self.peers = {}
+        self.fileInfos = {}
+        self.uploads = {}
         self.waitingForState = False
         self.player.skipOnError = True
         self.driftTimer.stop()
@@ -219,6 +246,11 @@ class TogetherController(QObject):
         start = max(0, self.player.currentIndex - 100)
         window = queue[start:start + MAX_SHARED_QUEUE]
         tracks = [self._trackOf(song) for song in window]
+        for song, track in zip(window, tracks):
+            fileId = self._localFileId(song)
+            if fileId and not track.get("url"):
+                track["fileId"] = fileId
+                track["fileExt"] = os.path.splitext(song["path"])[1].lower()
         index = self.player.currentIndex - start if self.player.currentIndex >= 0 else -1
         playing = self.player.isPlaying() or (self.player.loading and self.player.loadAutoplay)
         current = self.player.currentSong()
@@ -260,6 +292,7 @@ class TogetherController(QObject):
             "effects": dict(self.roomEffects) if self.roomEffects else None, "version": self.version, "by": self.myId(),
         }
         self.link.publish(self.code, "state", self.state, retain=True)
+        self._ensureUploads()
 
     # ---------- remote changes ----------
     def _onReceived(self, code, subtopic, payload):
@@ -271,6 +304,9 @@ class TogetherController(QObject):
             self._onPresence(subtopic[len("presence/"):], payload)
         elif subtopic == "msg" and isinstance(payload, dict):
             self._onMessage(payload)
+        elif subtopic.startswith("files/") and isinstance(payload, dict):
+            if payload.get("failed") or (validRoomFile(payload)):
+                self.fileInfos[subtopic[len("files/"):]] = payload
 
     def _onRemoteState(self, state):
         if not isinstance(state, dict) or not isinstance(state.get("queue"), list):
@@ -354,6 +390,12 @@ class TogetherController(QObject):
             song = self.database.findSongByUrl(track["url"])
         if song is None and track.get("title"):
             song = self.database.findSong(track["title"], track.get("artist") or "")
+        if song is None and track.get("fileId") and not track.get("url"):
+            query = track.get("query") or f"ytsearch1:{track.get('artist') or ''} - {track.get('title') or ''} audio"
+            songId = self.database.addStreamSong(f"roomfile:{track['fileId']}|{query}", track.get("title") or "Senza titolo",
+                                                 track.get("artist") or "", track.get("album") or "", track.get("duration") or 0,
+                                                 None, hidden=True)
+            song = self.database.getSong(songId)
         if song is None:
             target = track.get("url") or track.get("query") or \
                 f"ytsearch1:{track.get('artist') or ''} - {track.get('title') or ''} audio".replace("ytsearch1: - ", "ytsearch1:")
@@ -406,6 +448,7 @@ class TogetherController(QObject):
             if (payload.get("joinedAt") or 0) > self.joinedAt:
                 self.notify(f"{self.peers[peerId]['name']} è entrato nella stanza")
             self._ping(peerId)
+            QTimer.singleShot(500, self._ensureUploads)
         self.peersChanged.emit()
 
     def _ping(self, peerId):
@@ -427,6 +470,102 @@ class TogetherController(QObject):
                 self.clock.onPong(message.get("from"), int(message["t0"]), int(message["t1"]), nowMs())
             except (KeyError, TypeError, ValueError):
                 pass
+
+    # ---------- personal files (mp3 not on YouTube) ----------
+    def _localFileId(self, song):
+        path = str(song.get("path") or "")
+        if not path or isStreamPath(path) or song.get("url"):
+            return None
+        cached = self.fileIdCache.get(path)
+        if cached and time.time() - cached[0] < FILE_ID_CACHE_SECONDS:
+            return cached[1]
+        try:
+            stats = os.stat(path)
+            fileId = hashlib.sha1(f"{os.path.abspath(path)}|{stats.st_size}|{int(stats.st_mtime)}".encode("utf-8")).hexdigest()[:24]
+        except OSError:
+            fileId = None
+        self.fileIdCache[path] = (time.time(), fileId)
+        return fileId
+
+    def _ensureUploads(self):
+        """Uploads (encrypted, 1 hour) the current and the next song if they are your own files and someone else is here."""
+        if not self.code or not self.otherPeers():
+            return
+        queue = self.player.queue
+        index = self.player.currentIndex
+        for song in queue[max(0, index):max(0, index) + 2]:
+            fileId = self._localFileId(song)
+            if not fileId:
+                continue
+            if time.time() - self.failedUploads.get(fileId, 0) < 600:
+                continue
+            upload = self.uploads.get(fileId)
+            if upload and (upload["state"] == "uploading" or time.time() - upload["at"] < REUPLOAD_AFTER_SECONDS):
+                continue
+            self.uploads[fileId] = {"state": "uploading", "at": time.time()}
+            code = self.code
+            runInBackground(self._uploadFile, song["path"], fileId, pool=self.uploadPool,
+                            onFinished=lambda info, code=code: self._onUploaded(code, info),
+                            onError=lambda message, fileId=fileId, code=code: self._onUploadFailed(code, fileId, message))
+
+    @staticmethod
+    def _uploadFile(path, fileId):
+        blobPath = os.path.join(TEMP_DIR, f"room_upload_{fileId}.blob")
+        try:
+            key, sha = encryptFile(path, blobPath)
+            url = uploadTemporary(blobPath)
+        finally:
+            try:
+                os.remove(blobPath)
+            except OSError:
+                pass
+        return {"id": fileId, "url": url, "key": key, "sha": sha, "ext": os.path.splitext(path)[1].lower(), "at": int(time.time())}
+
+    def _onUploaded(self, code, info):
+        self.uploads[info["id"]] = {"state": "done", "at": time.time()}
+        if code == self.code:
+            self.link.publish(code, f"files/{info['id']}", info, retain=True)
+
+    def _onUploadFailed(self, code, fileId, message):
+        self.uploads.pop(fileId, None)
+        alreadyFailed = fileId in self.failedUploads
+        self.failedUploads[fileId] = time.time()
+        if code == self.code:
+            self.link.publish(code, f"files/{fileId}", {"id": fileId, "failed": True}, retain=True)
+        if not alreadyFailed:
+            self.notify("Non riesco a mandare la canzone agli altri: la cercheranno su YouTube")
+
+    def resolveRoomFile(self, target, useCache=True):
+        """Runs in a worker thread: waits for the friend's upload, downloads and decrypts it; falls back to YouTube."""
+        body = target[len("roomfile:"):]
+        fileId, _, query = body.partition("|")
+        deadline = time.time() + ROOM_FILE_WAIT_SECONDS
+        info = self.fileInfos.get(fileId)
+        while info is None and time.time() < deadline and self.code:
+            time.sleep(0.5)
+            info = self.fileInfos.get(fileId)
+        if info is not None and not info.get("failed"):
+            try:
+                fetchInfo = dict(info, sha=info.get("sha") or fileId)
+                path = self.roomCache.fetch(fetchInfo)
+                self.currentRoomFile = path
+                self.roomFilePaths[fileId] = path
+                from PySide6.QtCore import QUrl
+                return {"url": QUrl.fromLocalFile(path).toString(), "headers": {}, "duration": 0}
+            except Exception as error:
+                print(f"[Together] file della stanza non scaricato: {error!r}")
+        if not query:
+            raise RuntimeError("canzone non disponibile")
+        from .downloader import resolveStream
+        return resolveStream(query, useCache)
+
+    def _fileMaintenance(self):
+        current = self.currentRoomFile
+        song = self.player.currentSong()
+        if current and song and str(song.get("path") or "").startswith("stream:roomfile:"):
+            self.roomCache.touch(current)
+        self.roomCache.cleanup(keep=[current] if current else [])
+        self._ensureUploads()
 
     # ---------- helpers ----------
     @staticmethod

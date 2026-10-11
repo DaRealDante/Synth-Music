@@ -1,13 +1,14 @@
 import os
 
 from PySide6.QtCore import QSize, Qt, QUrl
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView, QListWidget, QListWidgetItem,
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QToolButton, QVBoxLayout,
+    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QTabWidget, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from .. import audio_tools, metadata
@@ -467,7 +468,8 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Impostazioni")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(640)
+        self.restartForColors = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
         layout.setSpacing(14)
@@ -494,11 +496,14 @@ class SettingsDialog(QDialog):
         self.copyCheck = QCheckBox("Copia i file importati nella cartella musica")
         self.copyCheck.setChecked(bool(settings.get("copyImported")))
         form.addRow("", self.copyCheck)
-        self.streamOnlyCheck = QCheckBox("Non scaricare: aggiungi le canzoni da YouTube solo in streaming")
+        self.streamOnlyCheck = QCheckBox("Solo streaming: le canzoni da YouTube non vengono scaricate (scaricale dal menu → Scarica sul PC)")
         self.streamOnlyCheck.setToolTip("Le canzoni non occupano spazio ma servono internet per ascoltarle.\n"
                                         "Puoi sempre scaricarne una dal menu della canzone → Scarica sul PC.")
         self.streamOnlyCheck.setChecked(bool(settings.get("streamOnly")))
         form.addRow("", self.streamOnlyCheck)
+        self.streamVideoCheck = QCheckBox("Mostra il video in streaming quando non è scaricato")
+        self.streamVideoCheck.setChecked(bool(settings.get("streamVideo")))
+        form.addRow("", self.streamVideoCheck)
         self.autoVideoCheck = QCheckBox("Salva automaticamente il video delle canzoni scaricate")
         self.autoVideoCheck.setChecked(bool(settings.get("autoVideo")))
         form.addRow("", self.autoVideoCheck)
@@ -512,10 +517,24 @@ class SettingsDialog(QDialog):
         self.autoUpdateCheck = QCheckBox("Controlla da solo se c'è una nuova versione di Synth Music")
         self.autoUpdateCheck.setChecked(bool(settings.get("autoCheckUpdates")))
         form.addRow("", self.autoUpdateCheck)
+        self.discordCheck = QCheckBox("Mostra su Discord cosa stai ascoltando (con tempo e copertina)")
+        self.discordCheck.setChecked(bool(settings.get("discordPresence")))
+        form.addRow("", self.discordCheck)
+        self.discordIdEdit = QLineEdit(settings.get("discordClientId") or "")
+        from ..config import DISCORD_CLIENT_ID
+        self.discordIdEdit.setPlaceholderText("Vuoto = quello di Synth Music" if DISCORD_CLIENT_ID else "Incolla l'ID della tua app Discord")
+        self.discordIdEdit.setToolTip("ID applicazione dal Discord Developer Portal (solo se vuoi usarne uno tuo)")
+        form.addRow("ID app Discord", self.discordIdEdit)
         self.autoLyricsCheck = QCheckBox("Salva automaticamente i testi")
         self.autoLyricsCheck.setChecked(bool(settings.get("autoLyrics")))
         form.addRow("", self.autoLyricsCheck)
-        layout.addLayout(form)
+        self.tabs = QTabWidget()
+        generalPage = QWidget()
+        generalPage.setLayout(form)
+        self.tabs.addTab(generalPage, "Generale")
+        self.tabs.addTab(self._buildAppearanceTab(), "Aspetto")
+        self.tabs.addTab(self._buildEffectsTab(), "Animazioni")
+        layout.addWidget(self.tabs)
         infoRow = QHBoxLayout()
         profileButton = QPushButton("Profilo...")
         profileButton.setToolTip("Nome e foto che vedono gli amici in \"Ascolta insieme\"")
@@ -528,6 +547,9 @@ class SettingsDialog(QDialog):
         engineButton.setToolTip("Scarica l'ultima versione di yt-dlp (serve se i download da YouTube smettono di funzionare)")
         engineButton.clicked.connect(lambda: parent.checkEngineUpdate(force=True) if parent else None)
         infoRow.addWidget(engineButton)
+        infoRow.addStretch()
+        layout.addLayout(infoRow)
+        infoRow = QHBoxLayout()
         checkButton = QPushButton("Controlla aggiornamenti")
         checkButton.clicked.connect(lambda: parent.checkAppUpdate(manual=True) if parent else None)
         infoRow.addWidget(checkButton)
@@ -540,6 +562,8 @@ class SettingsDialog(QDialog):
         versionLabel.setObjectName("small")
         infoRow.addWidget(versionLabel)
         layout.addLayout(infoRow)
+        for button in self.findChildren(QPushButton):
+            button.setMinimumWidth(button.sizeHint().width())
         buttons = QHBoxLayout()
         buttons.addStretch()
         cancelButton = QPushButton("Annulla")
@@ -566,6 +590,87 @@ class SettingsDialog(QDialog):
         if self.parent():
             self.parent().close()
 
+    COLOR_FIELDS = (("accent", "Accento"), ("background", "Sfondo pagine"), ("panel", "Pannelli"),
+                    ("sidebar", "Barra e menu laterale"), ("text", "Testo"))
+
+    def _buildAppearanceTab(self):
+        from . import theme
+        page = QWidget()
+        column = QVBoxLayout(page)
+        column.setSpacing(12)
+        hint = QLabel("Scegli i colori principali. Si applicano riavviando l'app (lo fa da sola).")
+        hint.setObjectName("small")
+        hint.setWordWrap(True)
+        column.addWidget(hint)
+        self.chosenColors = dict(settings.get("themeColors") or {})
+        self.colorButtons = {}
+        colorForm = QFormLayout()
+        colorForm.setSpacing(10)
+        for key, label in self.COLOR_FIELDS:
+            button = QPushButton()
+            button.setFixedSize(120, 30)
+            button.clicked.connect(lambda checked=False, colorKey=key: self._pickColor(colorKey))
+            self.colorButtons[key] = button
+            colorForm.addRow(label, button)
+        column.addLayout(colorForm)
+        presetLabel = QLabel("Temi pronti")
+        presetLabel.setObjectName("sub")
+        column.addWidget(presetLabel)
+        presetGrid = QGridLayout()
+        presetGrid.setSpacing(8)
+        for index, (name, colors) in enumerate(theme.COLOR_PRESETS.items()):
+            presetButton = QPushButton(name)
+            swatch = QColor(colors.get("accent", theme.DEFAULT_COLORS["accent"]))
+            presetButton.setStyleSheet(f"QPushButton {{ border-left: 6px solid {swatch.name()}; }}")
+            presetButton.clicked.connect(lambda checked=False, preset=colors: self._applyPreset(preset))
+            presetGrid.addWidget(presetButton, index // 4, index % 4)
+        column.addLayout(presetGrid)
+        resetButton = QPushButton("Ripristina colori originali")
+        resetButton.clicked.connect(lambda: self._applyPreset({}))
+        column.addWidget(resetButton, 0, Qt.AlignLeft)
+        column.addStretch()
+        self._refreshColorButtons()
+        return page
+
+    def _currentColor(self, key):
+        from . import theme
+        return self.chosenColors.get(key) or theme.DEFAULT_COLORS[key]
+
+    def _refreshColorButtons(self):
+        for key, button in self.colorButtons.items():
+            color = QColor(self._currentColor(key))
+            textColor = "#000000" if color.lightnessF() > 0.55 else "#FFFFFF"
+            button.setText(color.name().upper())
+            button.setStyleSheet(f"QPushButton {{ background: {color.name()}; color: {textColor}; border: 1px solid #555; border-radius: 6px; }}")
+
+    def _pickColor(self, key):
+        from PySide6.QtWidgets import QColorDialog
+        color = QColorDialog.getColor(QColor(self._currentColor(key)), self, "Scegli un colore")
+        if color.isValid():
+            self.chosenColors[key] = color.name().upper()
+            self._refreshColorButtons()
+
+    def _applyPreset(self, preset):
+        self.chosenColors = dict(preset)
+        self._refreshColorButtons()
+
+    def _buildEffectsTab(self):
+        page = QWidget()
+        column = QVBoxLayout(page)
+        column.setSpacing(10)
+        self.effectChecks = {}
+        for key, text in (("fxTransitions", "Transizioni: pagine che sfumano, popup morbidi, card che si illuminano, bottoni che rimbalzano"),
+                          ("fxCoverColors", "Colori dalla copertina: la barra e \"In riproduzione\" cambiano colore con la canzone"),
+                          ("fxVisualizer", "Visualizer: barre che si muovono a ritmo"),
+                          ("fxMicro", "Micro-effetti: cuore che esplode al like, copertina che pulsa sui bassi"),
+                          ("fxSongFade", "Dissolvenza tra canzoni (fade-in all'inizio, fade-out alla fine)")):
+            check = QCheckBox(text)
+            check.setChecked(bool(settings.get(key)))
+            self.effectChecks[key] = check
+            column.addWidget(check)
+        column.addStretch()
+        return page
+
     def _editProfile(self):
         from .together_popup import ProfileDialog
         if ProfileDialog(self).exec() == ProfileDialog.Accepted and self.parent() is not None and hasattr(self.parent(), "together"):
@@ -583,6 +688,14 @@ class SettingsDialog(QDialog):
         settings.set("copyImported", self.copyCheck.isChecked())
         settings.set("autoVideo", self.autoVideoCheck.isChecked())
         settings.set("streamOnly", self.streamOnlyCheck.isChecked())
+        settings.set("streamVideo", self.streamVideoCheck.isChecked())
+        for key, check in self.effectChecks.items():
+            settings.set(key, check.isChecked())
+        colorsChanged = (settings.get("themeColors") or {}) != self.chosenColors
+        settings.set("themeColors", dict(self.chosenColors))
+        self.restartForColors = colorsChanged
+        settings.set("discordPresence", self.discordCheck.isChecked())
+        settings.set("discordClientId", "".join(character for character in self.discordIdEdit.text() if character.isdigit()))
         settings.set("videoQuality", self.videoQualityCombo.currentText())
         settings.set("autoLyrics", self.autoLyricsCheck.isChecked())
         settings.set("pauseVideoInBackground", self.pauseVideoCheck.isChecked())

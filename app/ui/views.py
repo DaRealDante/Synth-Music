@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from .. import downloader, spotify_import
 from ..config import settings
 from ..workers import runInBackground
-from . import theme
+from . import effects, theme
 from .song_table import SongTable
 
 
@@ -29,10 +29,11 @@ def _bigPlayButton(tooltip="Riproduci"):
     button = QToolButton()
     button.setObjectName("bigPlay")
     button.setFixedSize(56, 56)
-    button.setIcon(theme.icon("play", "#000000", 24))
+    button.setIcon(theme.icon("play", theme.ACCENT_TEXT, 24))
     button.setIconSize(QSize(24, 24))
     button.setToolTip(tooltip)
     button.setCursor(Qt.PointingHandCursor)
+    button.clicked.connect(lambda: effects.bounce(button, QSize(24, 24)))
     return button
 
 
@@ -228,6 +229,22 @@ class FavoritesPage(SongListPage):
         self.setSongs(self.window.database.favoriteSongs(), "Premi il cuore su una canzone per salvarla qui.")
 
 
+class RecentPage(SongListPage):
+    LIMIT = 15
+
+    def __init__(self, window):
+        super().__init__(window, bannerColor="#0D5C63")
+        self.banner.kindLabel.setText("Playlist")
+        self.banner.titleLabel.setText("Recenti")
+        self.banner.descriptionLabel.setText("Le ultime 15 canzoni ascoltate: le tue e quelle messe dagli amici in Ascolta insieme.")
+        self.banner.coverLabel.setPixmap(theme.placeholderCover(170, 4, "clock"))
+        self.connectTable(self.table, {"recent": True})
+
+    def refresh(self):
+        self.setSongs(self.window.database.recentlyPlayed(self.LIMIT, includeHidden=True),
+                      "Qui compaiono le ultime canzoni che ascolti.")
+
+
 class PlaylistPage(SongListPage):
     def __init__(self, window):
         super().__init__(window, reorderable=True, bannerColor="#3A3A3A")
@@ -300,6 +317,7 @@ class Card(QFrame):
         self.setStyleSheet(
             f"QFrame#card {{ background: {theme.PANEL}; border-radius: 8px; }} QFrame#card:hover {{ background: {theme.HOVER}; }}"
         )
+        self.glow = effects.HoverGlow(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 14)
         layout.setSpacing(6)
@@ -349,6 +367,7 @@ class QuickTile(QFrame):
             "QFrame#tile { background: rgba(255,255,255,0.07); border-radius: 6px; }"
             "QFrame#tile:hover { background: rgba(255,255,255,0.16); }"
         )
+        self.glow = effects.HoverGlow(self)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 10, 0)
         layout.setSpacing(12)
@@ -574,6 +593,8 @@ class WebResultWidget(QFrame):
         streamMenu = menu.addMenu(theme.icon("cloud"), "Aggiungi a playlist (solo streaming)")
         for playlist in window.database.playlists():
             streamMenu.addAction(playlist["name"], lambda pid=playlist["id"]: window.addStreamEntries([self.entry], pid))
+        if settings.get("streamOnly"):
+            menu.addAction(theme.icon("download"), "Scarica sul PC", lambda: window.downloads.enqueue(self.entry))
         menu.addSeparator()
         menu.addAction(theme.icon("add"), "Nuova playlist...", self._toNewPlaylist)
         menu.addSeparator()

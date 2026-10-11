@@ -1,6 +1,11 @@
+import collections
+import re
 import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 
 import numpy
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
@@ -139,6 +144,25 @@ def applyReverbOffline(samples, wet, decaySeconds):
     return (mixed / max(1.0, peak / 0.98)).astype(numpy.float32)
 
 
+SPECTRUM_BANDS = 32
+FADE_IN_SECONDS = 1.0
+FADE_OUT_SECONDS = 2.0
+STREAM_CHUNK_BYTES = 10 * 1024 * 1024
+STREAM_READ_BYTES = 64 * 1024
+
+
+def friendlyStreamError(message):
+    """ffmpeg/HTTP errors contain the whole (very long) stream URL: keep only what a person can understand."""
+    text = re.sub(r"https?://\S+", "", str(message or "")).strip(" :\n")
+    if "403" in text or "Forbidden" in text:
+        return "YouTube ha rifiutato lo streaming (403)"
+    if "404" in text or "410" in text:
+        return "Lo stream non è più disponibile"
+    if not text or len(text) > 160:
+        return "Streaming non riuscito (connessione)"
+    return text
+
+
 def isRemote(path):
     return bool(path) and str(path).lower().startswith(("http://", "https://"))
 
@@ -159,20 +183,21 @@ class _Decoder(threading.Thread):
     def run(self):
         executable = ffmpegExe()
         command = [executable, "-nostdin", "-hide_banner", "-loglevel", "error"]
-        if isRemote(self.path):
-            command += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
-            if self.headers:
-                command += ["-headers", "".join(f"{key}: {value}\r\n" for key, value in self.headers.items())]
-        command += ["-i", self.path, "-vn", "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE)]
+        remote = isRemote(self.path)
+        command += ["-i", "pipe:0" if remote else self.path, "-vn", "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE)]
         audioFilter = speedFilter(self.rate, self.keepPitch)
         if audioFilter:
             command += ["-af", audioFilter]
         command += ["-f", "s16le", "-acodec", "pcm_s16le", "-"]
         try:
-            self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATE_FLAGS)
+            self.process = subprocess.Popen(command, stdin=subprocess.PIPE if remote else subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, creationflags=CREATE_FLAGS)
         except Exception as error:
             self.engine._decoderFailed(self.generation, str(error))
             return
+        self.feedError = None
+        if remote:
+            threading.Thread(target=self._feed, args=(self.process.stdin,), daemon=True).start()
         buffer = numpy.zeros((self.estimatedFrames, CHANNELS), dtype=numpy.int16)
         self.engine._attachBuffer(self.generation, buffer)
         frameBytes = 2 * CHANNELS
@@ -199,10 +224,78 @@ class _Decoder(threading.Thread):
             return
         self.process.wait()
         errorText = self.process.stderr.read().decode("utf-8", "ignore").strip()
-        if decodedFrames == 0:
+        if remote and (self.feedError or decodedFrames == 0):
+            errorText = friendlyStreamError(self.feedError or errorText)
+        if decodedFrames == 0 or (remote and self.feedError):
             self.engine._decoderFailed(self.generation, errorText or "Impossibile decodificare il file")
         else:
             self.engine._decodeFinished(self.generation, decodedFrames)
+
+    def _feed(self, pipe):
+        """Downloads the stream in 10 MB ranges (like yt-dlp does) and hands it to ffmpeg: YouTube refuses or throttles one giant request."""
+        position = 0
+        total = None
+        failures = 0
+        try:
+            while not self.cancelled:
+                if total is not None and position >= total:
+                    return
+                request = urllib.request.Request(
+                    self.path, headers={**self.headers, "Range": f"bytes={position}-{position + STREAM_CHUNK_BYTES - 1}"})
+                try:
+                    response = urllib.request.urlopen(request, timeout=20)
+                except urllib.error.HTTPError as error:
+                    if error.code == 416:
+                        return
+                    failures += 1
+                    if error.code in (403, 404, 410) or failures > 4:
+                        self.feedError = f"HTTP {error.code} {error.reason}"
+                        return
+                    time.sleep(0.6 * failures)
+                    continue
+                except Exception as error:
+                    failures += 1
+                    if failures > 4:
+                        self.feedError = str(error)
+                        return
+                    time.sleep(0.6 * failures)
+                    continue
+                received = 0
+                with response:
+                    contentRange = response.headers.get("Content-Range") or ""
+                    if "/" in contentRange and contentRange.rsplit("/", 1)[1].strip().isdigit():
+                        total = int(contentRange.rsplit("/", 1)[1])
+                    wholeFile = response.status == 200
+                    try:
+                        while not self.cancelled:
+                            data = response.read(STREAM_READ_BYTES)
+                            if not data:
+                                break
+                            pipe.write(data)
+                            received += len(data)
+                    except (BrokenPipeError, ValueError):
+                        return
+                    except Exception as error:
+                        failures += 1
+                        if failures > 4:
+                            self.feedError = str(error)
+                            return
+                position += received
+                if received:
+                    failures = 0
+                if wholeFile and received:
+                    return
+                if received == 0:
+                    failures += 1
+                    if total is None or failures > 4:
+                        return
+        except (BrokenPipeError, ValueError):
+            pass
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
 
     def _kill(self):
         try:
@@ -268,6 +361,11 @@ class AudioEngine(QObject):
 
         self.stream = None
         self.streamError = None
+        self.spectrumEnabled = True
+        self.fadeEnabled = True
+        self.spectrumQueue = collections.deque(maxlen=32)
+        self.spectrumLevels = [0.0] * SPECTRUM_BANDS
+        self.bandEdges = {}
 
         self.pollTimer = QTimer(self)
         self.pollTimer.setInterval(40)
@@ -505,6 +603,61 @@ class AudioEngine(QObject):
         wet = self.reverbWet
         return samples * (1.0 - 0.45 * wet) + wetSignal * (0.6 * wet)
 
+    # ---------- visualizer and fades ----------
+    def _applyFade(self, samples, startFrame):
+        fadeInFrames = FADE_IN_SECONDS * SAMPLE_RATE
+        fadeOutFrames = FADE_OUT_SECONDS * SAMPLE_RATE
+        endFrame = startFrame + len(samples)
+        needsFadeIn = startFrame < fadeInFrames
+        needsFadeOut = self.decodeDone and self.decodedFrames - endFrame < fadeOutFrames
+        if not needsFadeIn and not needsFadeOut:
+            return samples
+        indexes = numpy.arange(startFrame, endFrame, dtype=numpy.float32)
+        envelope = numpy.ones(len(samples), dtype=numpy.float32)
+        if needsFadeIn:
+            envelope *= numpy.clip(indexes / fadeInFrames, 0.0, 1.0)
+        if needsFadeOut:
+            envelope *= numpy.clip((self.decodedFrames - indexes) / fadeOutFrames, 0.0, 1.0)
+        return samples * envelope[:, None]
+
+    def _measureSpectrum(self, samples):
+        count = len(samples)
+        if count < 256:
+            return
+        edges = self.bandEdges.get(count)
+        if edges is None:
+            frequencies = numpy.fft.rfftfreq(count, 1.0 / SAMPLE_RATE)
+            limits = numpy.geomspace(40, 16000, SPECTRUM_BANDS + 1)
+            edges = [(int(numpy.searchsorted(frequencies, limits[index])), max(int(numpy.searchsorted(frequencies, limits[index + 1])),
+                                                                                int(numpy.searchsorted(frequencies, limits[index])) + 1))
+                     for index in range(SPECTRUM_BANDS)]
+            self.bandEdges[count] = (edges, numpy.hanning(count).astype(numpy.float32))
+            edges = self.bandEdges[count]
+        bandRanges, window = edges
+        mono = samples.mean(axis=1) * window
+        magnitudes = numpy.abs(numpy.fft.rfft(mono)) / (count / 4)
+        levels = []
+        for start, end in bandRanges:
+            peak = float(magnitudes[start:end].max()) if end > start else 0.0
+            decibels = 20 * numpy.log10(peak + 1e-9)
+            levels.append(float(min(1.0, max(0.0, (decibels + 60) / 60))))
+        latency = OUTPUT_LATENCY
+        try:
+            latency = float(self.stream.latency) if self.stream is not None else OUTPUT_LATENCY
+        except Exception:
+            pass
+        self.spectrumQueue.append((time.monotonic() + latency, levels))
+
+    def spectrum(self):
+        """Levels 0..1 of the bands you are hearing right now (delayed by the sound card latency)."""
+        now = time.monotonic()
+        with self.lock:
+            while self.spectrumQueue and self.spectrumQueue[0][0] <= now:
+                self.spectrumLevels = self.spectrumQueue.popleft()[1]
+            if self._state != QMediaPlayer.PlayingState:
+                self.spectrumLevels = [0.0] * SPECTRUM_BANDS
+            return list(self.spectrumLevels)
+
     # ---------- output stream ----------
     def _ensureStream(self):
         if self.stream is not None and self.streamError is None:
@@ -585,9 +738,12 @@ class AudioEngine(QObject):
                 else:
                     outdata.fill(0)
                     return
+            startFrame = self.frame
             samples, endReached = self._readFrames(frames)
             if endReached:
                 self.reachedEnd = True
+            if self.fadeEnabled and not self.loopFrames:
+                samples = self._applyFade(samples, startFrame)
             sos = self.sos
             if sos is not None:
                 from scipy.signal import sosfilt
@@ -595,6 +751,8 @@ class AudioEngine(QObject):
                     self.zi = numpy.zeros((sos.shape[0], 2, CHANNELS))
                 samples, self.zi = sosfilt(sos, samples, axis=0, zi=self.zi)
             samples = self._applyReverb(samples)
+            if self.spectrumEnabled:
+                self._measureSpectrum(samples)
             gain = 0.0 if self._muted else self._volume * self.preampFactor
             samples = samples * gain
             if self._balance:

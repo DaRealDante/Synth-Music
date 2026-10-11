@@ -1,5 +1,6 @@
 import os
 import random
+import re
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QMediaPlayer
@@ -12,6 +13,19 @@ from .workers import runInBackground
 def _defaultStreamResolver(target, useCache=True):
     from .downloader import resolveStream
     return resolveStream(target, useCache)
+
+
+def _shortError(message):
+    text = re.sub(r"https?://\S+", "", str(message or ""))
+    text = re.sub(r"^\s*ERROR:\s*", "", text.strip().splitlines()[0] if text.strip() else "")
+    text = re.sub(r"\s*\(caused by.*$", "", text)
+    text = text.strip(" :;")
+    return (text[:120] + "...") if len(text) > 120 else (text or "errore sconosciuto")
+
+
+def _defaultStreamFallback(target):
+    from .downloader import downloadTempAudio
+    return downloadTempAudio(target)
 
 
 def _forgetStream(target):
@@ -59,6 +73,12 @@ class Player(QObject):
         self.loadGeneration = 0
         self.loadAutoplay = False
         self.streamRetriedFor = None
+        self.streamFallbackFor = None
+        self.streamFallback = _defaultStreamFallback
+        self.roomFileResolver = None
+        from PySide6.QtCore import QThreadPool
+        self.resolvePool = QThreadPool(self)
+        self.resolvePool.setMaxThreadCount(3)
         self.skipOnError = True
 
         self.loopTimer = QTimer(self)
@@ -198,6 +218,8 @@ class Player(QObject):
         self.loadGeneration += 1
         if self.streamRetriedFor is not None and self.streamRetriedFor != song.get("id"):
             self.streamRetriedFor = None
+        if self.streamFallbackFor is not None and self.streamFallbackFor != song.get("id"):
+            self.streamFallbackFor = None
         if isStreamPath(song["path"]):
             self._loadStream(song, autoplay, startPosition, self.loadGeneration)
             return
@@ -241,11 +263,32 @@ class Player(QObject):
         self._setLoading(True)
         self.songChanged.emit(song)
         target = streamTarget(song["path"])
+        resolver = self.streamResolver
+        if target.startswith("roomfile:") and self.roomFileResolver is not None:
+            resolver = self.roomFileResolver
         runInBackground(
-            self.streamResolver, target, useCache,
+            resolver, target, useCache, pool=self.resolvePool,
             onFinished=lambda info: self._onStreamResolved(generation, song, info, startPosition),
             onError=lambda message: self._onStreamFailed(generation, song, message),
         )
+
+    def _loadFallback(self, song, startPosition):
+        self.loadGeneration += 1
+        generation = self.loadGeneration
+        self.loadAutoplay = True
+        self._setLoading(True)
+        target = streamTarget(song["path"])
+        runInBackground(
+            self.streamFallback, target, pool=self.resolvePool,
+            onFinished=lambda path: self._onFallbackReady(generation, song, path, startPosition),
+            onError=lambda message: self._onStreamFailed(generation, song, message),
+        )
+
+    def _onFallbackReady(self, generation, song, path, startPosition):
+        if generation != self.loadGeneration or self.currentSong() is not song:
+            return
+        self._setLoading(False)
+        self._startSource(song, QUrl.fromLocalFile(os.path.abspath(path)), self.loadAutoplay, startPosition)
 
     def _onStreamResolved(self, generation, song, info, startPosition):
         if generation != self.loadGeneration or self.currentSong() is not song:
@@ -260,7 +303,7 @@ class Player(QObject):
         self._setLoading(False)
         autoplay = self.loadAutoplay
         if autoplay:
-            self.playbackError.emit(f"Streaming non disponibile: {message[:150]}")
+            self.playbackError.emit(f"Streaming non disponibile: {_shortError(message)}")
             self.consecutiveErrors += 1
             if self.skipOnError and self.consecutiveErrors < len(self.queue):
                 QTimer.singleShot(50, self.next)
@@ -448,6 +491,11 @@ class Player(QObject):
             _forgetStream(streamTarget(song["path"]))
             self.loadGeneration += 1
             self._loadStream(song, True, self.mediaPlayer.position(), self.loadGeneration, useCache=False)
+            return
+        if song is not None and isStreamPath(song["path"]) and error != QMediaPlayer.ResourceError \
+                and self.streamFallbackFor != song.get("id") and not streamTarget(song["path"]).startswith("roomfile:"):
+            self.streamFallbackFor = song.get("id")
+            self._loadFallback(song, self.mediaPlayer.position())
             return
         self.playbackError.emit(message or "Errore di riproduzione")
         if error == QMediaPlayer.ResourceError:

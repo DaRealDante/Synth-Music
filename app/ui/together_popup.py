@@ -303,6 +303,8 @@ class TogetherPopup(QFrame):
         self.anchor = anchor
         self.rebuild()
         self._place()
+        from .effects import popIn
+        popIn(self)
         self.show()
 
     def _place(self):

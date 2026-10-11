@@ -62,14 +62,57 @@ def test_streamSongMenuHasDownloadAndNoCut(window, monkeypatch):
     captured = captureMenu(monkeypatch)
     window.showSongMenu([song], None, {})
     assert "Scarica sul PC" in captured["actions"]
-    assert "Taglia audio..." not in captured["actions"]
+    assert "Taglia audio..." in captured["actions"]
     assert "Mostra nella cartella" not in captured["actions"]
 
 
-def test_cutOnStreamSongShowsMessage(window):
+def test_cutOnStreamSongFetchesAudioFirst(window, monkeypatch, tmp_path):
+    from app import downloader
+    from app.ui import main_window
+    tempFile = tmp_path / "temp.m4a"
+    tempFile.write_bytes(b"x")
+    monkeypatch.setattr(downloader, "downloadTempAudio", lambda target: str(tempFile))
+    opened = []
+
+    class FakeCutDialog:
+        def __init__(self, parent, song, callback, selection):
+            opened.append(song)
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(main_window, "CutDialog", FakeCutDialog)
     song = window.database.findSongByUrl("https://www.youtube.com/watch?v=aaaaaaaaaaa")
     window.openCutDialog(song)
-    assert "streaming" in window.toast.text()
+    assert waitFor(lambda: opened)
+    assert opened[0]["path"] == str(tempFile) and opened[0]["streamOrigin"].startswith("stream:")
+
+
+def test_replaceCutOfStreamSongBecomesFile(window, monkeypatch, tmp_path):
+    from app.config import settings
+    monkeypatch.setattr(settings, "musicDir", lambda: str(tmp_path))
+    song = window.database.findSongByUrl("https://www.youtube.com/watch?v=aaaaaaaaaaa")
+    cutFile = tmp_path / "cut_tmp.mp3"
+    import shutil, subprocess
+    from app.config import ffmpegExe
+    subprocess.run([ffmpegExe(), "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=2", str(cutFile)], check=True)
+    window._onCutDone(dict(song, path=str(tmp_path / "temp.m4a"), streamOrigin=song["path"]), str(cutFile), song["title"], True,
+                      {"mode": "keep", "startMs": 0, "endMs": 2000})
+    updated = window.database.getSong(song["id"])
+    assert not updated["path"].startswith("stream:") and updated["path"].startswith(str(tmp_path))
+    import os
+    assert os.path.isfile(updated["path"])
+
+
+def test_deleteSongMovesFileToTrash(window, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.Yes)
+    filePath = tmp_path / "da_eliminare.mp3"
+    filePath.write_bytes(b"x")
+    songId = window.database.addSong(str(filePath), "Da eliminare", "", "", 1)
+    window.deleteSongs([window.database.getSong(songId)])
+    assert window.database.getSong(songId) is None
+    assert not filePath.exists()
 
 
 def test_downloadReplacesStreamSong(window, tmp_path):
@@ -88,3 +131,42 @@ def test_hiddenSongSavedWhenAddedToPlaylist(window):
     playlistId = window.database.createPlaylist("Mia")
     window.addToPlaylist(playlistId, [hiddenId])
     assert window.database.getSong(hiddenId)["hidden"] == 0
+
+
+def test_streamingIsDefault():
+    from app.config import settings
+    assert settings.get("streamOnly") is True
+    assert settings.get("streamVideo") is True
+
+
+def test_videoStreamsWithoutDownload(window, monkeypatch, tmp_path):
+    from app import downloader
+    from app.config import settings
+    calls = []
+    monkeypatch.setattr(downloader, "resolveVideoStream", lambda target, height: calls.append((target, height)) or "http://127.0.0.1:9/video.mp4")
+    monkeypatch.setattr(window, "_activeForVideo", lambda: True)
+    songId = window.database.addStreamSong("https://www.youtube.com/watch?v=vvvvvvvvvvv", "Con video", "", "", 100, None)
+    song = window.database.getSong(songId)
+    assert window.videoSourceFor(song) is None
+    assert window.videoStreamLoading(song)
+    assert waitFor(lambda: not window.videoStreamLoading(song))
+    assert window.videoSourceFor(song) == "http://127.0.0.1:9/video.mp4"
+    assert ("https://www.youtube.com/watch?v=vvvvvvvvvvv", int(settings.get("videoQuality"))) in calls
+    videoFile = tmp_path / "v.mp4"
+    videoFile.write_bytes(b"x")
+    window.database.updateSong(songId, videoPath=str(videoFile))
+    assert window.videoSourceFor(song) == str(videoFile)
+    settings.set("streamVideo", False)
+    window.database.updateSong(songId, videoPath=None)
+    assert window.videoSourceFor(song) is None
+    settings.set("streamVideo", True)
+
+
+def test_recentShowsFriendsSongsToo(window):
+    hiddenId = window.database.addStreamSong("https://youtu.be/rrrrrrrrrrr", "Messa da amico", "", "", 100, None, hidden=True)
+    window.database.registerPlay(hiddenId)
+    window.navigate("recent")
+    titles = [song["title"] for song in window.recentPage.table.visibleSongs()]
+    assert titles[0] == "Messa da amico"
+    assert "Messa da amico" not in [song["title"] for song in window.database.allSongs()]
+    assert len(titles) <= 15
