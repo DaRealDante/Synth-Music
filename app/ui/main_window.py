@@ -1120,6 +1120,7 @@ class MainWindow(QMainWindow):
             "keepPitch": bool(fresh.get("keepPitch", 1) if fresh.get("keepPitch") is not None else 1),
             "reverbWet": float(fresh.get("reverbWet") or 0.0),
             "reverbSize": float(fresh.get("reverbSize") or 1.8),
+            "bassBoost": float(fresh.get("bassBoost") or 0.0),
         }
 
     def effectsForSong(self, song):
@@ -1142,12 +1143,15 @@ class MainWindow(QMainWindow):
             self.together.setLocalEffects(effects)
             self.player.setPlaybackRate(effects["rate"], effects["keepPitch"])
             self.player.setReverb(effects["reverbWet"], effects["reverbSize"])
+            self.player.setBassBoost(effects.get("bassBoost", 0.0))
             self.playerBar.setEffectsIndicator(effects)
             return
         self.database.updateSong(current["id"], songRate=effects["rate"], keepPitch=1 if effects["keepPitch"] else 0,
-                                 reverbWet=effects["reverbWet"], reverbSize=effects["reverbSize"])
+                                 reverbWet=effects["reverbWet"], reverbSize=effects["reverbSize"],
+                                 bassBoost=effects.get("bassBoost", 0.0))
         self.player.setPlaybackRate(effects["rate"], effects["keepPitch"])
         self.player.setReverb(effects["reverbWet"], effects["reverbSize"])
+        self.player.setBassBoost(effects.get("bassBoost", 0.0))
         self.playerBar.setEffectsIndicator(effects)
 
     def exportWithEffects(self, localSong=None):
@@ -1161,8 +1165,8 @@ class MainWindow(QMainWindow):
             self.withLocalAudio(song, lambda prepared: self.exportWithEffects(prepared))
             return
         effects = self.songEffects(song)
-        if abs(effects["rate"] - 1.0) < 0.005 and effects["reverbWet"] < 0.005:
-            self.showStatus("Imposta prima una velocità o il reverb")
+        if abs(effects["rate"] - 1.0) < 0.005 and effects["reverbWet"] < 0.005 and effects.get("bassBoost", 0) < 0.005:
+            self.showStatus("Imposta prima una velocità, il reverb o il bass boost")
             return
         self.effectsPopup.hide()
         tags = [f"{effects['rate']:.2f}x"] if abs(effects["rate"] - 1.0) >= 0.005 else []
@@ -1170,6 +1174,8 @@ class MainWindow(QMainWindow):
             tags.append("reverb")
         if effects["rate"] < 1 and effects["reverbWet"] >= 0.005:
             tags = ["slowed + reverb"]
+        if effects.get("bassBoost", 0) >= 0.005:
+            tags.append("bass boost")
         newTitle, accepted = QInputDialog.getText(self, "Salva come nuova canzone", "Nome:",
                                                   text=f"{song.get('title')} ({' '.join(tags)})")
         if not accepted or not newTitle.strip():
@@ -1196,7 +1202,7 @@ class MainWindow(QMainWindow):
             self.showStatus(f"Creato \"{newTitle}\" nella libreria", 4000)
 
         runInBackground(audio_tools.renderWithEffects, song["path"], outputPath, effects["rate"], effects["keepPitch"],
-                        effects["reverbWet"], effects["reverbSize"], settings.get("audioQuality"),
+                        effects["reverbWet"], effects["reverbSize"], settings.get("audioQuality"), effects.get("bassBoost", 0.0),
                         onFinished=onFinished, onError=lambda message: self.showStatus(f"Errore: {message[:120]}", 6000))
 
     # ---------- video in background ----------

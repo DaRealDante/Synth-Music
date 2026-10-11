@@ -145,6 +145,36 @@ def applyReverbOffline(samples, wet, decaySeconds):
 
 
 SPECTRUM_BANDS = 32
+BASS_BOOST_MAX_DB = 12.0
+BASS_BOOST_FREQUENCY = 100.0
+
+
+def lowShelfSos(gainDb, frequency=BASS_BOOST_FREQUENCY, sampleRate=SAMPLE_RATE):
+    """RBJ low-shelf biquad (one SOS row): boosts everything below `frequency` by `gainDb`."""
+    if abs(gainDb) < 0.05:
+        return None
+    amplitude = 10 ** (gainDb / 40)
+    omega = 2 * numpy.pi * frequency / sampleRate
+    alpha = numpy.sin(omega) / 2 * numpy.sqrt(2)
+    cosine = numpy.cos(omega)
+    rootTerm = 2 * numpy.sqrt(amplitude) * alpha
+    b0 = amplitude * ((amplitude + 1) - (amplitude - 1) * cosine + rootTerm)
+    b1 = 2 * amplitude * ((amplitude - 1) - (amplitude + 1) * cosine)
+    b2 = amplitude * ((amplitude + 1) - (amplitude - 1) * cosine - rootTerm)
+    a0 = (amplitude + 1) + (amplitude - 1) * cosine + rootTerm
+    a1 = -2 * ((amplitude - 1) + (amplitude + 1) * cosine)
+    a2 = (amplitude + 1) + (amplitude - 1) * cosine - rootTerm
+    return numpy.array([[b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0]])
+
+
+def applyBassBoostOffline(samples, amount):
+    sos = lowShelfSos(float(amount) * BASS_BOOST_MAX_DB)
+    if sos is None:
+        return samples
+    from scipy.signal import sosfilt
+    boosted = sosfilt(sos, samples, axis=0)
+    peak = float(numpy.max(numpy.abs(boosted))) or 1.0
+    return (boosted / max(1.0, peak / 0.98)).astype(numpy.float32)
 FADE_IN_SECONDS = 1.0
 FADE_OUT_SECONDS = 2.0
 STREAM_CHUNK_BYTES = 10 * 1024 * 1024
@@ -362,6 +392,9 @@ class AudioEngine(QObject):
         self.stream = None
         self.streamError = None
         self.spectrumEnabled = True
+        self.bassBoost = 0.0
+        self.bassSos = None
+        self.bassZi = None
         self.fadeEnabled = True
         self.spectrumQueue = collections.deque(maxlen=32)
         self.spectrumLevels = [0.0] * SPECTRUM_BANDS
@@ -548,6 +581,16 @@ class AudioEngine(QObject):
             if newSos is None or self.sos is None or newSos.shape != self.sos.shape:
                 self.zi = None
             self.sos = newSos
+
+    # ---------- bass boost ----------
+    def setBassBoost(self, amount):
+        amount = max(0.0, min(1.0, float(amount or 0)))
+        sos = lowShelfSos(amount * BASS_BOOST_MAX_DB)
+        with self.lock:
+            self.bassBoost = amount
+            if sos is None or self.bassSos is None:
+                self.bassZi = None
+            self.bassSos = sos
 
     # ---------- reverb ----------
     def setReverb(self, wet, decaySeconds):
@@ -750,6 +793,12 @@ class AudioEngine(QObject):
                 if self.zi is None or self.zi.shape[0] != sos.shape[0]:
                     self.zi = numpy.zeros((sos.shape[0], 2, CHANNELS))
                 samples, self.zi = sosfilt(sos, samples, axis=0, zi=self.zi)
+            bassSos = self.bassSos
+            if bassSos is not None:
+                from scipy.signal import sosfilt
+                if self.bassZi is None:
+                    self.bassZi = numpy.zeros((1, 2, CHANNELS))
+                samples, self.bassZi = sosfilt(bassSos, samples, axis=0, zi=self.bassZi)
             samples = self._applyReverb(samples)
             if self.spectrumEnabled:
                 self._measureSpectrum(samples)

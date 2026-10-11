@@ -240,6 +240,7 @@ class Player(QObject):
             effects = self.effectsProvider(song)
             self.mediaPlayer.presetRate(effects["rate"], effects["keepPitch"])
             self.mediaPlayer.setReverb(effects["reverbWet"], effects["reverbSize"])
+            self.mediaPlayer.setBassBoost(effects.get("bassBoost", 0.0))
             self.effectsApplied.emit(effects)
         self.mediaPlayer.sourceHeaders = dict(headers or {})
         self.mediaPlayer.durationHintMs = int(durationHintMs or 0)
@@ -397,6 +398,9 @@ class Player(QObject):
 
     def setReverb(self, wet, decaySeconds):
         self.mediaPlayer.setReverb(wet, decaySeconds)
+
+    def setBassBoost(self, amount):
+        self.mediaPlayer.setBassBoost(amount)
 
     def setEqualizer(self, gains, preampDb, enabled):
         self.mediaPlayer.setEqualizer(gains, preampDb, enabled)

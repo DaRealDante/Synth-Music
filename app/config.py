@@ -4,7 +4,7 @@ import shutil
 import sys
 
 APP_NAME = "Synth Music"
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 DISCORD_CLIENT_ID = ""  # ID dell'applicazione "Synth Music" sul Discord Developer Portal
 UPDATE_REPO = "DaRealDante/Synth-Music"  # "utente/repository" su GitHub: lo compila da solo PUBBLICA_AGGIORNAMENTO.bat
 
@@ -85,6 +85,7 @@ DEFAULT_SETTINGS = {
     "fxMicro": True,
     "fxSongFade": True,
     "themeColors": {},
+    "roomDelayMs": 0,
 }
 
 

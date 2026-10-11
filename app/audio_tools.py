@@ -106,19 +106,20 @@ def convertToMp3(inputPath, outputPath, quality="192"):
     return outputPath
 
 
-def renderWithEffects(inputPath, outputPath, rate, keepPitch, reverbWet, reverbSize, quality="192"):
-    """Bakes speed / pitch / reverb into a new file (same sound as the live player)."""
+def renderWithEffects(inputPath, outputPath, rate, keepPitch, reverbWet, reverbSize, quality="192", bassBoost=0.0):
+    """Bakes speed / pitch / bass boost / reverb into a new file (same sound as the live player)."""
     import numpy
     import tempfile
     import wave
-    from .audio_engine import CHANNELS, SAMPLE_RATE, applyReverbOffline, speedFilter
+    from .audio_engine import CHANNELS, SAMPLE_RATE, applyBassBoostOffline, applyReverbOffline, speedFilter
     arguments = ["-i", inputPath, "-vn", "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE)]
     audioFilter = speedFilter(rate, keepPitch)
     if audioFilter:
         arguments += ["-af", audioFilter]
     rawData = runFfmpeg(arguments + ["-f", "f32le", "-acodec", "pcm_f32le", "-"], captureOutput=True)
     samples = numpy.frombuffer(rawData, dtype=numpy.float32).reshape(-1, CHANNELS)
-    samples = applyReverbOffline(samples.copy(), reverbWet, reverbSize)
+    samples = applyBassBoostOffline(samples.copy(), bassBoost)
+    samples = applyReverbOffline(samples, reverbWet, reverbSize)
     temporaryFolder = tempfile.mkdtemp()
     wavePath = os.path.join(temporaryFolder, "render.wav")
     try:

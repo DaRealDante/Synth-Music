@@ -266,10 +266,12 @@ class PlayerBar(QFrame):
         self.onModesChanged()
 
     def setEffectsIndicator(self, effects):
-        active = abs(effects["rate"] - 1.0) > 0.005 or effects["reverbWet"] > 0.005
+        bass = effects.get("bassBoost", 0.0)
+        active = abs(effects["rate"] - 1.0) > 0.005 or effects["reverbWet"] > 0.005 or bass > 0.005
         self.speedButton.setIcon(theme.icon("speed", theme.ACCENT if active else theme.SUBTEXT, 18))
         details = f"{effects['rate']:.2f}x" + ("" if effects["keepPitch"] else ", pitch libero") + \
-            (f", reverb {int(effects['reverbWet'] * 100)}%" if effects["reverbWet"] > 0.005 else "")
+            (f", reverb {int(effects['reverbWet'] * 100)}%" if effects["reverbWet"] > 0.005 else "") + \
+            (f", bassi +{bass * 12:.0f} dB" if bass > 0.005 else "")
         self.speedButton.setToolTip(f"Velocità ed effetti: {details}")
 
     def setTogetherActive(self, active, peopleCount=0):

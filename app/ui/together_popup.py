@@ -265,6 +265,26 @@ class TogetherPopup(QFrame):
             layout.addWidget(peopleLabel)
             for peerId, peer in sorted(self.controller.peers.items(), key=lambda item: item[1].get("joinedAt") or 0):
                 layout.addWidget(PersonRow(peer, peerId == self.controller.myId()))
+            delayRow = QHBoxLayout()
+            delayRow.addWidget(QLabel("Ritardo"))
+            delayRow.addStretch()
+            self.delayLabel = QLabel("")
+            self.delayLabel.setObjectName("h3")
+            delayRow.addWidget(self.delayLabel)
+            layout.addLayout(delayRow)
+            from .equalizer_page import EqSlider
+            self.delaySlider = EqSlider(Qt.Horizontal)
+            self.delaySlider.setRange(0, 60)
+            self.delaySlider.setValue(self.controller.delayMs() // 50)
+            self.delaySlider.setToolTip("Doppio click = nessun ritardo")
+            self.delaySlider.mouseDoubleClickEvent = lambda event: self.delaySlider.setValue(0)
+            self.delaySlider.valueChanged.connect(self._onDelayChanged)
+            layout.addWidget(self.delaySlider)
+            delayHint = QLabel("Vale solo per te: se in chiamata su Discord senti gli altri in ritardo, aumentalo finché la musica combacia.")
+            delayHint.setObjectName("small")
+            delayHint.setWordWrap(True)
+            layout.addWidget(delayHint)
+            self._showDelay(self.controller.delayMs())
             leaveButton = QPushButton("Esci dalla stanza")
             leaveButton.clicked.connect(self.controller.leaveRoom)
             layout.addWidget(leaveButton)
@@ -274,6 +294,14 @@ class TogetherPopup(QFrame):
         self.adjustSize()
         if self.isVisible() and self.anchor is not None:
             self._place()
+
+    def _showDelay(self, delayMs):
+        self.delayLabel.setText("Nessuno" if delayMs <= 0 else f"+{delayMs / 1000:.2f} s")
+
+    def _onDelayChanged(self, value):
+        delayMs = value * 50
+        self._showDelay(delayMs)
+        self.controller.setDelay(delayMs)
 
     def _copy(self, text, message):
         QGuiApplication.clipboard().setText(text)

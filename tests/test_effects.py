@@ -46,3 +46,25 @@ def test_dominantColorOfRedCover(tmp_path):
     color = dominantColor(path)
     assert color.red() > color.green() * 3 and color.red() > color.blue() * 3
     assert dominantColor(None) is None
+
+
+def test_bassBoostRaisesLowsNotHighs():
+    from app.audio_engine import applyBassBoostOffline
+    times = numpy.arange(SAMPLE_RATE) / SAMPLE_RATE
+    low = (0.1 * numpy.sin(2 * numpy.pi * 50 * times)).astype(numpy.float32)
+    high = (0.1 * numpy.sin(2 * numpy.pi * 5000 * times)).astype(numpy.float32)
+    lowOut = applyBassBoostOffline(numpy.stack([low, low], axis=1), 1.0)
+    highOut = applyBassBoostOffline(numpy.stack([high, high], axis=1), 1.0)
+    lowGain = numpy.abs(lowOut[SAMPLE_RATE // 2:]).max() / 0.1
+    highGain = numpy.abs(highOut[SAMPLE_RATE // 2:]).max() / 0.1
+    assert lowGain > 3.0 and 0.9 < highGain < 1.15
+    assert numpy.array_equal(applyBassBoostOffline(numpy.stack([low, low], axis=1), 0.0), numpy.stack([low, low], axis=1))
+
+
+def test_effectsPopupHasBassBoost():
+    from app.ui.effects_popup import EffectsPopup
+    popup = EffectsPopup()
+    popup.setSong({"title": "x"}, {"rate": 1.0, "keepPitch": True, "reverbWet": 0.0, "reverbSize": 1.8, "bassBoost": 0.5})
+    assert popup.values()["bassBoost"] == 0.5 and popup.bassLabel.text() == "+6.0 dB"
+    popup.applyPreset({"rate": 0.85, "keepPitch": False, "reverbWet": 0.45, "reverbSize": 3.0})
+    assert popup.values()["bassBoost"] == 0.5

@@ -46,7 +46,8 @@ def _effectsEqual(first, second):
         return first == second
     return (abs(float(first["rate"]) - float(second["rate"])) < 0.001 and bool(first["keepPitch"]) == bool(second["keepPitch"])
             and abs(float(first["reverbWet"]) - float(second["reverbWet"])) < 0.001
-            and abs(float(first["reverbSize"]) - float(second["reverbSize"])) < 0.001)
+            and abs(float(first["reverbSize"]) - float(second["reverbSize"])) < 0.001
+            and abs(float(first.get("bassBoost", 0.0)) - float(second.get("bassBoost", 0.0))) < 0.001)
 
 
 class TogetherController(QObject):
@@ -65,6 +66,7 @@ class TogetherController(QObject):
         self.notify = notify or (lambda text: None)
         self.clientId = clientId
         self.profileOverride = profile
+        self.delayOverride = None
         self.link = Link(self)
         self.link.received.connect(self._onReceived)
         self.link.connectedChanged.connect(self.connectionChanged)
@@ -224,6 +226,7 @@ class TogetherController(QObject):
             return
         self.player.setPlaybackRate(effects["rate"], effects["keepPitch"])
         self.player.setReverb(effects["reverbWet"], effects["reverbSize"])
+        self.player.setBassBoost(effects.get("bassBoost", 0.0))
         self.effectsChanged.emit(dict(effects))
 
     # ---------- local changes ----------
@@ -285,7 +288,7 @@ class TogetherController(QObject):
             if self.state and self._currentTrackKey(self.state) == currentKey:
                 positionMs = expectedPosition(self.state, nowMs(), self.clock.offset(self.state.get("by")))
         else:
-            positionMs = self.player.position()
+            positionMs = self.player.position() + self.delayMs()
         self.version += 1
         self.state = {
             "queue": tracks, "index": index, "positionMs": int(positionMs), "playing": bool(playing), "at": nowMs(),
@@ -366,14 +369,20 @@ class TogetherController(QObject):
                 self.player.originalQueue = list(songs)
                 self.player.currentIndex = index
                 self.player.queueChanged.emit()
-            expected = expectedPosition(state, nowMs(), self.clock.offset(state.get("by")))
+            expected = self._targetPosition(state)
             if not sameSong:
-                self.player._loadCurrent(autoplay=bool(state.get("playing")), startPosition=expected)
+                self.player._loadCurrent(autoplay=bool(state.get("playing")) and expected >= 0, startPosition=max(0, expected))
                 return
             if effects and not _effectsEqual(effects, {"rate": self.player.playbackRate(), "keepPitch": self.player.mediaPlayer.keepPitch(),
                                                        "reverbWet": self.player.mediaPlayer.reverbWet,
-                                                       "reverbSize": self.player.mediaPlayer.reverbSize}):
+                                                       "reverbSize": self.player.mediaPlayer.reverbSize,
+                                                       "bassBoost": self.player.mediaPlayer.bassBoost}):
                 self._applyEffects(effects)
+            if expected < 0:
+                if self.player.isPlaying():
+                    self.player.mediaPlayer.pause()
+                self.player.mediaPlayer.setPosition(0)
+                return
             if abs(self.player.position() - expected) > DRIFT_TOLERANCE_MS:
                 self.player.mediaPlayer.setPosition(expected)
             if state.get("playing") and not self.player.isPlaying():
@@ -413,9 +422,15 @@ class TogetherController(QObject):
         current = self.player.currentSong()
         if current is None or self._keyOf(current) != self._currentTrackKey(state):
             return
-        expected = expectedPosition(state, nowMs(), self.clock.offset(state.get("by")))
+        expected = self._targetPosition(state)
         self.applying += 1
         try:
+            if expected < 0:
+                if self.player.isPlaying():
+                    self.player.mediaPlayer.pause()
+                if self.player.position() > DRIFT_TOLERANCE_MS:
+                    self.player.mediaPlayer.setPosition(0)
+                return
             if state.get("playing") and not self.player.isPlaying():
                 duration = self.player.duration()
                 if not duration or expected < duration - 1500:
@@ -566,6 +581,29 @@ class TogetherController(QObject):
             self.roomCache.touch(current)
         self.roomCache.cleanup(keep=[current] if current else [])
         self._ensureUploads()
+
+    # ---------- personal delay ----------
+    def delayMs(self):
+        """Extra delay chosen by this person (e.g. to match what friends hear on a Discord call)."""
+        value = self.delayOverride if self.delayOverride is not None else settings.get("roomDelayMs")
+        try:
+            return max(0, min(3000, int(value or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def setDelay(self, delayMs):
+        delayMs = max(0, min(3000, int(delayMs)))
+        if self.delayOverride is not None:
+            self.delayOverride = delayMs
+        else:
+            settings.set("roomDelayMs", delayMs)
+            settings.save()
+        if self.code:
+            QTimer.singleShot(0, self._checkDrift)
+
+    def _targetPosition(self, state):
+        """Where MY player should be: the room position minus my delay (negative = not started yet for me)."""
+        return expectedPosition(state, nowMs(), self.clock.offset(state.get("by"))) - self.delayMs()
 
     # ---------- helpers ----------
     @staticmethod

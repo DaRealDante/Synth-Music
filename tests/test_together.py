@@ -180,3 +180,33 @@ def test_streamFailureInRoomDoesNotSkipOrPauseOthers(localBroker, toneUrl, fakeS
     assert alice.player.isPlaying()
     assert bruno.player.currentIndex == 0
     shutdown(alice, bruno)
+
+
+def test_personalDelayKeepsMeBehind(localBroker, toneUrl, fakeSoundCard):
+    alice, bruno = makeMember("Alice", toneUrl), makeMember("Bruno", toneUrl)
+    bruno.controller.delayOverride = 0
+    songIds = [alice.database.addStreamSong("https://youtu.be/ddddddddddd", "Ritardata", "X", "", 90, None)]
+    alice.player.playSongs(alice.database.getSongs(songIds), 0)
+    code = alice.controller.createRoom()
+    bruno.controller.joinRoom(code)
+    assert waitFor(lambda: bruno.player.isPlaying(), 15)
+    pump(1.5)
+    bruno.controller.setDelay(1500)
+    assert waitFor(lambda: 1000 < alice.player.position() - bruno.player.position() < 2000, 8)
+    alice.player.seek(30000)
+    assert waitFor(lambda: 27500 < bruno.player.position() < 29500 and alice.player.position() >= 30000, 8)
+    bruno.player.pause()
+    assert waitFor(lambda: not alice.player.isPlaying(), 8)
+    assert abs(alice.controller.state["positionMs"] - (bruno.player.position() + 1500)) < 300
+    shutdown(alice, bruno)
+
+
+def test_bassBoostSharedInRoom(localBroker, toneUrl, fakeSoundCard):
+    alice, bruno = makeMember("Alice", toneUrl), makeMember("Bruno", toneUrl)
+    alice.savedEffects["Bassi"] = {"rate": 1.0, "keepPitch": True, "reverbWet": 0.0, "reverbSize": 1.8, "bassBoost": 0.6}
+    songIds = [alice.database.addStreamSong("https://youtu.be/bbbbbbbbbbb", "Bassi", "X", "", 90, None)]
+    alice.player.playSongs(alice.database.getSongs(songIds), 0)
+    code = alice.controller.createRoom()
+    bruno.controller.joinRoom(code)
+    assert waitFor(lambda: abs(bruno.player.mediaPlayer.bassBoost - 0.6) < 0.001, 15)
+    shutdown(alice, bruno)

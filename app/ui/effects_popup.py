@@ -4,7 +4,8 @@ from PySide6.QtWidgets import QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabe
 from . import theme
 from .equalizer_page import EqSlider
 
-DEFAULT_EFFECTS = {"rate": 1.0, "keepPitch": True, "reverbWet": 0.0, "reverbSize": 1.8}
+DEFAULT_EFFECTS = {"rate": 1.0, "keepPitch": True, "reverbWet": 0.0, "reverbSize": 1.8, "bassBoost": 0.0}
+BASS_BOOST_MAX_DB = 12
 
 PRESETS = [
     ("Normale", {"rate": 1.0, "keepPitch": True, "reverbWet": 0.0}),
@@ -76,6 +77,21 @@ class EffectsPopup(QFrame):
         separator.setStyleSheet("background: #3A3A3A;")
         layout.addWidget(separator)
 
+        bassRow = QHBoxLayout()
+        bassRow.addWidget(QLabel("Bass boost"))
+        bassRow.addStretch()
+        self.bassLabel = QLabel("Spento")
+        self.bassLabel.setObjectName("h3")
+        bassRow.addWidget(self.bassLabel)
+        layout.addLayout(bassRow)
+        self.bassSlider = EqSlider(Qt.Horizontal)
+        self.bassSlider.setRange(0, 100)
+        self.bassSlider.setValue(0)
+        self.bassSlider.setToolTip("Doppio click = spento")
+        self.bassSlider.mouseDoubleClickEvent = lambda event: self.bassSlider.setValue(0)
+        self.bassSlider.valueChanged.connect(self._onChanged)
+        layout.addWidget(self.bassSlider)
+
         reverbRow = QHBoxLayout()
         reverbRow.addWidget(QLabel("Reverb"))
         reverbRow.addStretch()
@@ -109,7 +125,7 @@ class EffectsPopup(QFrame):
         layout.addWidget(hint)
         buttonsRow = QHBoxLayout()
         resetButton = QPushButton("Ripristina")
-        resetButton.clicked.connect(lambda: self.applyPreset(PRESETS[0][1] | {"reverbSize": 1.8}))
+        resetButton.clicked.connect(lambda: self.applyPreset(PRESETS[0][1] | {"reverbSize": 1.8, "bassBoost": 0.0}))
         exportButton = QPushButton("Salva come nuova canzone")
         exportButton.setObjectName("accent")
         exportButton.setToolTip("Crea un file con velocità ed effetti applicati")
@@ -127,6 +143,7 @@ class EffectsPopup(QFrame):
         self.pitchCheck.setChecked(bool(effects["keepPitch"]))
         self.reverbSlider.setValue(int(round(effects["reverbWet"] * 100)))
         self.sizeSlider.setValue(int(round(effects["reverbSize"] * 10)))
+        self.bassSlider.setValue(int(round(effects.get("bassBoost", 0.0) * 100)))
         self.updating = False
         self._refreshLabels()
 
@@ -136,6 +153,7 @@ class EffectsPopup(QFrame):
             "keepPitch": self.pitchCheck.isChecked(),
             "reverbWet": self.reverbSlider.value() / 100,
             "reverbSize": self.sizeSlider.value() / 10,
+            "bassBoost": self.bassSlider.value() / 100,
         }
 
     def applyPreset(self, preset):
@@ -145,6 +163,7 @@ class EffectsPopup(QFrame):
         self.pitchCheck.setChecked(bool(values["keepPitch"]))
         self.reverbSlider.setValue(int(round(values["reverbWet"] * 100)))
         self.sizeSlider.setValue(int(round(values["reverbSize"] * 10)))
+        self.bassSlider.setValue(int(round(values.get("bassBoost", 0.0) * 100)))
         self.updating = False
         self._refreshLabels()
         self.emitTimer.stop()
@@ -155,7 +174,8 @@ class EffectsPopup(QFrame):
         self.speedLabel.setText(f"{values['rate']:.2f}x")
         self.reverbLabel.setText("Spento" if values["reverbWet"] <= 0 else f"{int(values['reverbWet'] * 100)}%")
         self.sizeLabel.setText(f"{values['reverbSize']:.1f} s")
-        for slider in (self.speedSlider, self.reverbSlider, self.sizeSlider):
+        self.bassLabel.setText("Spento" if values["bassBoost"] <= 0 else f"+{values['bassBoost'] * BASS_BOOST_MAX_DB:.1f} dB")
+        for slider in (self.speedSlider, self.reverbSlider, self.sizeSlider, self.bassSlider):
             slider.update()
 
     def _onChanged(self, *args):

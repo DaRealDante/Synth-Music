@@ -54,13 +54,14 @@ CREATE INDEX IF NOT EXISTS idxLoops ON loops(songId);
 SCHEMA_VERSION = 2
 SONG_FIELDS = ("title", "artist", "album", "duration", "cover", "source", "url", "favorite", "path",
                "lyrics", "syncedLyrics", "lyricsChecked", "lyricsAuto", "videoPath", "videoUrl", "videoAuto", "videoChecked", "cutInfo",
-               "songRate", "keepPitch", "reverbWet", "reverbSize", "hidden")
+               "songRate", "keepPitch", "reverbWet", "reverbSize", "hidden", "bassBoost")
 SONG_COLUMNS_V2 = {
     "lyrics": "TEXT", "syncedLyrics": "TEXT", "lyricsChecked": "INTEGER DEFAULT 0", "lyricsAuto": "INTEGER DEFAULT 1",
     "videoPath": "TEXT", "videoUrl": "TEXT", "videoAuto": "INTEGER DEFAULT 1", "videoChecked": "INTEGER DEFAULT 0",
     "cutInfo": "TEXT",
     "songRate": "REAL DEFAULT 1.0", "keepPitch": "INTEGER DEFAULT 1", "reverbWet": "REAL DEFAULT 0", "reverbSize": "REAL DEFAULT 1.8",
     "hidden": "INTEGER DEFAULT 0",
+    "bassBoost": "REAL DEFAULT 0",
 }
 STREAM_PREFIX = "stream:"
 

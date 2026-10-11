@@ -1,4 +1,4 @@
-# Synth Music v1.8.0
+# Synth Music v1.8.1
 
 ## Installare / aggiornare (tu)
 Doppio click su **`INSTALLA_E_AGGIORNA.bat`**. Fa tutto da solo:
@@ -57,6 +57,10 @@ Il motore YouTube (yt-dlp) si aggiorna da solo una volta al giorno: non serve ri
 - Impostazioni → **"Non scaricare: aggiungi le canzoni solo in streaming"**: il bottone Scarica diventa *Aggiungi* (vale anche per playlist YouTube e Spotify)
 - Le canzoni in streaming hanno "Streaming ·" sotto il titolo. Menu → *Scarica sul PC*; al contrario, su una canzone scaricata *Solo streaming (elimina il file)*
 - Taglia audio ed "Esporta con effetti" richiedono il file: scarica prima la canzone
+
+## Novità 1.8.1
+- **Bass boost** (fino a +12 dB) nel popup velocità/effetti: si salva per canzone, vale per tutti in stanza ed entra in "Salva come nuova canzone"
+- **Ritardo in stanza** (0–3 s, solo per te): bottone persone → slider "Ritardo", per far combaciare la musica con quello che senti degli amici su Discord
 
 ## Novità 1.8
 - **Scopri** (menu a sinistra): consigliati per te, "Perché hai ascoltato…", artisti che potrebbero piacerti, i tuoi artisti, novità, classifica mondiale e Top Italia. Click su un artista → la sua pagina. Le canzoni si provano in streaming; ＋ / tasto destro → salva, coda, playlist, scarica
