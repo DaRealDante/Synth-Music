@@ -4,7 +4,7 @@ import shutil
 import sys
 
 APP_NAME = "Synth Music"
-VERSION = "1.8.1"
+VERSION = "1.9.0"
 DISCORD_CLIENT_ID = ""  # ID dell'applicazione "Synth Music" sul Discord Developer Portal
 UPDATE_REPO = "DaRealDante/Synth-Music"  # "utente/repository" su GitHub: lo compila da solo PUBBLICA_AGGIORNAMENTO.bat
 
@@ -35,12 +35,13 @@ def _dataRoot():
 
 DATA_DIR = _dataRoot()
 COVERS_DIR = os.path.join(DATA_DIR, "covers")
+BACKGROUNDS_DIR = os.path.join(DATA_DIR, "backgrounds")
 TEMP_DIR = os.path.join(DATA_DIR, "temp")
 DB_PATH = os.path.join(DATA_DIR, "library.db")
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 DEFAULT_MUSIC_DIR = os.path.join(DATA_DIR, "music")
 
-for folderPath in (DATA_DIR, COVERS_DIR, TEMP_DIR, DEFAULT_MUSIC_DIR):
+for folderPath in (DATA_DIR, COVERS_DIR, BACKGROUNDS_DIR, TEMP_DIR, DEFAULT_MUSIC_DIR):
     os.makedirs(folderPath, exist_ok=True)
 
 
@@ -85,6 +86,8 @@ DEFAULT_SETTINGS = {
     "fxMicro": True,
     "fxSongFade": True,
     "themeColors": {},
+    "themeBackground": {},
+    "customThemes": {},
     "roomDelayMs": 0,
 }
 
