@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QPushButton, QScrollArea, QSizePolicy, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from .. import downloader, spotify_import
+from .. import apple_music, downloader, spotify_import
 from ..config import settings
 from ..workers import runInBackground
 from . import effects, theme
@@ -204,9 +204,10 @@ class LibraryPage(SongListPage):
         folderButton = QPushButton("Importa cartella")
         folderButton.setIcon(theme.icon("folder", theme.TEXT, 16))
         folderButton.clicked.connect(self.window.importFolder)
-        spotifyButton = QPushButton("Importa da Spotify")
+        spotifyButton = QPushButton("Importa playlist")
+        spotifyButton.setToolTip("Da Spotify, YouTube, YouTube Music o Apple Music")
         spotifyButton.setIcon(theme.icon("link", theme.TEXT, 16))
-        spotifyButton.clicked.connect(self.window.askSpotifyLink)
+        spotifyButton.clicked.connect(self.window.askImportLink)
         self.extraActions.addWidget(importButton)
         self.extraActions.addWidget(folderButton)
         self.extraActions.addWidget(spotifyButton)
@@ -717,7 +718,7 @@ class SearchPage(Page):
         searchRow = QHBoxLayout()
         self.searchEdit = QLineEdit()
         self.searchEdit.setObjectName("searchBox")
-        self.searchEdit.setPlaceholderText("Cosa vuoi ascoltare? (canzone, artista, link YouTube o link Spotify)")
+        self.searchEdit.setPlaceholderText("Cosa vuoi ascoltare? (canzone, artista o link YouTube, YouTube Music, Spotify, Apple Music)")
         self.searchEdit.addAction(theme.icon("search", theme.SUBTEXT, 18), QLineEdit.LeadingPosition)
         self.searchEdit.setClearButtonEnabled(True)
         self.searchEdit.returnPressed.connect(self.searchWeb)
@@ -764,7 +765,7 @@ class SearchPage(Page):
         bannerLayout.addWidget(importAllButton)
         self.playlistBanner.hide()
         webLayout.addWidget(self.playlistBanner)
-        self.webStatus = _label("Premi Invio o \"Cerca su YouTube\" per cercare online. Puoi anche incollare il link di un video o di una playlist YouTube, oppure di una playlist / album / brano Spotify.", "sub", wrap=True)
+        self.webStatus = _label("Premi Invio o \"Cerca su YouTube\" per cercare online. Puoi anche incollare il link di un video o di una playlist YouTube / YouTube Music, oppure di una playlist / album / brano Spotify o Apple Music.", "sub", wrap=True)
         webLayout.addWidget(self.webStatus)
         self.webList = QListWidget()
         self.webList.setSelectionMode(QAbstractItemView.NoSelection)
@@ -810,15 +811,17 @@ class SearchPage(Page):
         self.currentPlaylistInfo = None
         self.currentSpotifyInfo = None
         self.webStatus.show()
-        if spotify_import.isSpotifyUrl(query):
-            self.webStatus.setText("Leggo il link Spotify...")
-            runInBackground(
-                spotify_import.fetchSpotify, query,
-                onFinished=lambda info: self._onSpotify(serial, info),
-                onError=lambda message: serial == self.searchSerial and self.webStatus.setText(
-                    f"Impossibile leggere il link Spotify (deve essere pubblico): {message}"),
-            )
-            return
+        for isService, fetch, service in ((spotify_import.isSpotifyUrl, spotify_import.fetchSpotify, "Spotify"),
+                                          (apple_music.isAppleMusicUrl, apple_music.fetchAppleMusic, "Apple Music")):
+            if isService(query):
+                self.webStatus.setText(f"Leggo il link {service}...")
+                runInBackground(
+                    fetch, query,
+                    onFinished=lambda info: self._onSpotify(serial, info),
+                    onError=lambda message, service=service: serial == self.searchSerial and self.webStatus.setText(
+                        f"Impossibile leggere il link {service} (deve essere pubblico): {message}"),
+                )
+                return
         self.webStatus.setText("Ricerca in corso...")
         runInBackground(
             downloader.searchYoutube, query, int(settings.get("searchResults")),
@@ -836,7 +839,8 @@ class SearchPage(Page):
         self.webStatus.hide()
         self.currentPlaylistInfo = result if result.get("playlistTitle") else None
         if self.currentPlaylistInfo:
-            self.playlistBannerLabel.setText(f"Playlist: {result['playlistTitle']}  ·  {len(entries)} brani")
+            source = "Playlist YouTube Music" if result.get("source") == "YouTube Music" else "Playlist"
+            self.playlistBannerLabel.setText(f"{source}: {result['playlistTitle']}  ·  {len(entries)} brani")
             self.importAllButton.setText("Importa come playlist")
             self.playlistBanner.show()
         for entry in entries:
@@ -854,12 +858,13 @@ class SearchPage(Page):
         if serial != self.searchSerial:
             return
         tracks = info["tracks"]
+        source = info.get("source") or "Spotify"
         if not tracks:
-            self.webStatus.setText("La playlist Spotify è vuota o privata.")
+            self.webStatus.setText(f"La playlist {source} è vuota o privata.")
             return
         self.webStatus.hide()
         self.currentSpotifyInfo = info
-        kindText = {"playlist": "Playlist Spotify", "album": "Album Spotify", "track": "Brano Spotify"}[info["kind"]]
+        kindText = {"playlist": "Playlist", "album": "Album", "track": "Brano"}[info["kind"]] + " " + source
         self.playlistBannerLabel.setText(f"{kindText}: {info['name']}  ·  {len(tracks)} brani")
         self.importAllButton.setText("Scarica il brano" if info["kind"] == "track" else "Importa come playlist")
         self.playlistBanner.show()
@@ -909,7 +914,8 @@ class SearchPage(Page):
             return
         if not self.currentPlaylistInfo:
             return
-        playlistId = self.window.database.createPlaylist(self.currentPlaylistInfo["playlistTitle"], "Importata da YouTube")
+        playlistId = self.window.database.createPlaylist(self.currentPlaylistInfo["playlistTitle"],
+                                                         f"Importata da {self.currentPlaylistInfo.get('source') or 'YouTube'}")
         self.window.refreshPlaylists()
         if settings.get("streamOnly"):
             self.window.addStreamEntries(self.currentPlaylistInfo["entries"], playlistId)

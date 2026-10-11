@@ -1,6 +1,6 @@
 # Synth Music
 
-Player musicale per Windows stile Spotify: playlist, ricerca e download da YouTube, import da Spotify, testi sincronizzati, video di sfondo, equalizzatore, loop A-B, taglio audio.
+Player musicale per Windows stile Spotify: playlist, ricerca e download da YouTube, import di playlist da Spotify, YouTube Music e Apple Music, testi sincronizzati, video di sfondo, equalizzatore, loop A-B, taglio audio.
 
 ## ⬇️ Scarica
 

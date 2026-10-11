@@ -50,16 +50,47 @@ def _normalizeEntry(entry):
     }
 
 
+def isYoutubeMusicUrl(text):
+    return bool(re.match(r"^(https?://)?music\.youtube\.com/", (text or "").strip(), re.IGNORECASE))
+
+
+def normalizeYoutubeMusicUrl(url):
+    """music.youtube.com playlist/watch links -> the same list on youtube.com (more reliable with yt-dlp).
+    Album links (music.youtube.com/browse/MPREb_...) are left alone: yt-dlp resolves them itself."""
+    url = url.strip()
+    if not isYoutubeMusicUrl(url):
+        return url
+    if "://" not in url:
+        url = "https://" + url
+    from urllib.parse import parse_qs, urlparse
+    parsed = urlparse(url)
+    listId = (parse_qs(parsed.query).get("list") or [""])[0]
+    if listId in ("LM", "LL"):
+        raise RuntimeError("i \"Mi piace\" di YouTube Music sono privati: crea una playlist pubblica (o non in elenco) e incolla quel link")
+    if parsed.path.startswith("/browse/VL") and not listId:
+        listId = parsed.path[len("/browse/VL"):]
+    automaticMix = listId.startswith("RD") and not listId.startswith("RDCLAK")
+    if listId and not automaticMix and (parsed.path in ("/playlist", "/watch") or parsed.path.startswith("/browse/VL")):
+        return f"https://www.youtube.com/playlist?list={listId}"
+    if parsed.path == "/watch":
+        return url.replace("music.youtube.com", "www.youtube.com", 1)
+    return url
+
+
 def searchYoutube(query, maxResults=25):
     import yt_dlp
     options = _baseOptions()
     options["extract_flat"] = "in_playlist"
     with yt_dlp.YoutubeDL(options) as youtube:
-        if isUrl(query):
-            info = youtube.extract_info(query.strip(), download=False)
+        if isUrl(query) or isYoutubeMusicUrl(query):
+            fromMusic = isYoutubeMusicUrl(query)
+            target = normalizeYoutubeMusicUrl(query)
+            info = youtube.extract_info(target, download=False)
             if info.get("_type") == "playlist" or info.get("entries"):
                 entries = [_normalizeEntry(entry) for entry in (info.get("entries") or []) if entry]
-                return {"playlistTitle": info.get("title") or "Playlist importata", "entries": entries}
+                title = info.get("title") or "Playlist importata"
+                return {"playlistTitle": re.sub(r"^Album - ", "", title), "entries": entries,
+                        "source": "YouTube Music" if fromMusic else "YouTube"}
             return {"playlistTitle": None, "entries": [_normalizeEntry(info)]}
         info = youtube.extract_info(f"ytsearch{maxResults}:{query}", download=False)
         entries = [_normalizeEntry(entry) for entry in (info.get("entries") or []) if entry and entry.get("id")]
