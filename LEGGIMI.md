@@ -63,6 +63,7 @@ Il motore YouTube (yt-dlp) si aggiorna da solo una volta al giorno: non serve ri
 - **Crea il tuo tema** (Impostazioni → Aspetto): sfondo con **gradienti pronti**, **il tuo gradiente** (2–4 colori + direzione) o **la tua immagine / GIF animata**, con slider "Oscuramento" e anteprima dal vivo. Lo sfondo si applica subito, senza riavviare
 - **Abbina i colori allo sfondo**: accento e pannelli presi dal gradiente o dall'immagine
 - **I miei temi**: salva colori + sfondo con un nome e riapplicali quando vuoi
+- **Importa playlist** da **Spotify, YouTube, YouTube Music e Apple Music**: Libreria → *Importa playlist*, oppure incolla il link nella ricerca. Funziona con playlist, album e singoli brani pubblici (i "Mi piace" di YouTube Music sono privati: mettili in una playlist)
 - Il video di sfondo della canzone, quando c'è, resta sopra al tema; la GIF si ferma quando l'app è in secondo piano
 
 ## Novità 1.8.1

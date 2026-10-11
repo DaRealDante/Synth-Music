@@ -1666,9 +1666,10 @@ class MainWindow(QMainWindow):
         showInFolder(path)
 
     # ---------- spotify ----------
-    def askSpotifyLink(self):
-        link, accepted = QInputDialog.getText(self, "Importa da Spotify",
-                                              "Incolla il link di una playlist, album o brano Spotify (deve essere pubblico):")
+    def askImportLink(self):
+        link, accepted = QInputDialog.getText(self, "Importa playlist",
+                                              "Incolla il link di una playlist, album o brano da\n"
+                                              "Spotify, YouTube, YouTube Music o Apple Music (deve essere pubblico):")
         if accepted and link.strip():
             self.navigate("search")
             self.searchPage.searchEdit.setText(link.strip())
@@ -1679,7 +1680,8 @@ class MainWindow(QMainWindow):
         if info["kind"] == "track":
             self.downloadSpotifyTracks(tracks, None)
             return
-        playlistId = self.database.createPlaylist(info["name"] or "Playlist Spotify", info.get("description") or "Importata da Spotify",
+        source = info.get("source") or "Spotify"
+        playlistId = self.database.createPlaylist(info["name"] or f"Playlist {source}", info.get("description") or f"Importata da {source}",
                                                   info.get("coverPath"))
         self.downloadSpotifyTracks(tracks, playlistId)
         self.refreshPlaylists()
@@ -1702,7 +1704,7 @@ class MainWindow(QMainWindow):
             queued += 1
             self.downloads.enqueue({
                 "title": f"{trackInfo['artist']} - {trackInfo['title']}" if trackInfo["artist"] else trackInfo["title"],
-                "channel": "Spotify",
+                "channel": trackInfo.get("source") or "Spotify",
                 "duration": trackInfo["durationMs"] / 1000,
                 "url": None,
                 "thumbnail": trackInfo.get("image"),
