@@ -1,4 +1,4 @@
-# Synth Music v1.9.0
+# Synth Music v1.9.1
 
 ## Installare / aggiornare (tu)
 Doppio click su **`INSTALLA_E_AGGIORNA.bat`**. Fa tutto da solo:
@@ -57,6 +57,9 @@ Il motore YouTube (yt-dlp) si aggiorna da solo una volta al giorno: non serve ri
 - Impostazioni → **"Non scaricare: aggiungi le canzoni solo in streaming"**: il bottone Scarica diventa *Aggiungi* (vale anche per playlist YouTube e Spotify)
 - Le canzoni in streaming hanno "Streaming ·" sotto il titolo. Menu → *Scarica sul PC*; al contrario, su una canzone scaricata *Solo streaming (elimina il file)*
 - Taglia audio ed "Esporta con effetti" richiedono il file: scarica prima la canzone
+
+## Novità 1.9.1
+- **Importa playlist** da **Spotify, YouTube, YouTube Music e Apple Music**: Libreria → *Importa playlist*, oppure incolla il link nella ricerca. Funziona con playlist, album e singoli brani pubblici (i "Mi piace" di YouTube Music sono privati: mettili in una playlist)
 
 ## Novità 1.9
 - **Nuovo logo**
