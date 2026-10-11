@@ -54,6 +54,7 @@ class TogetherController(QObject):
     """Ascolta insieme: everybody in the room hears the same song at the same point; anybody can control it."""
 
     roomChanged = Signal()
+    roomFileFallback = Signal(str)
     peersChanged = Signal()
     connectionChanged = Signal(bool)
     effectsChanged = Signal(object)
@@ -70,6 +71,7 @@ class TogetherController(QObject):
         self.link = Link(self)
         self.link.received.connect(self._onReceived)
         self.link.connectedChanged.connect(self.connectionChanged)
+        self.roomFileFallback.connect(lambda body: self.notify("La canzone dell'amico non è arrivata: la cerco su YouTube"))
         self.code = None
         self.state = None
         self.version = 0
@@ -489,7 +491,7 @@ class TogetherController(QObject):
     # ---------- personal files (mp3 not on YouTube) ----------
     def _localFileId(self, song):
         path = str(song.get("path") or "")
-        if not path or isStreamPath(path) or song.get("url"):
+        if not path or isStreamPath(path) or (song.get("url") and song.get("source") != "cut"):
             return None
         cached = self.fileIdCache.get(path)
         if cached and time.time() - cached[0] < FILE_ID_CACHE_SECONDS:
@@ -569,6 +571,7 @@ class TogetherController(QObject):
                 return {"url": QUrl.fromLocalFile(path).toString(), "headers": {}, "duration": 0}
             except Exception as error:
                 print(f"[Together] file della stanza non scaricato: {error!r}")
+        self.roomFileFallback.emit(body)
         if not query:
             raise RuntimeError("canzone non disponibile")
         from .downloader import resolveStream

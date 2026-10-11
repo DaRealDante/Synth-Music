@@ -66,8 +66,14 @@ def loadRemoteImage(url, callback):
 
 
 def circularPixmap(pixmap, size):
-    return theme.roundedPixmap(pixmap.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                               .copy(0, 0, size, size), size // 2)
+    ratio = theme.displayRatio()
+    physical = max(1, round(size * ratio))
+    source = QPixmap(pixmap)
+    source.setDevicePixelRatio(1.0)
+    scaled = source.scaled(physical, physical, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    scaled = scaled.copy((scaled.width() - physical) // 2, (scaled.height() - physical) // 2, physical, physical)
+    scaled.setDevicePixelRatio(ratio)
+    return theme.roundedPixmap(scaled, size // 2)
 
 
 class DiscoverCard(QFrame):

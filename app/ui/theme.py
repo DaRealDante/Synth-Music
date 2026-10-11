@@ -1,5 +1,5 @@
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QLinearGradient, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication, QIcon, QLinearGradient, QPainter, QPainterPath, QPixmap
 
 from ..config import settings
 
@@ -344,18 +344,29 @@ def placeholderCover(size, seed=0, glyph="music"):
     return pixmap
 
 
+def displayRatio():
+    """Screen scaling (e.g. 1.25 / 1.5 on Windows): images are drawn at the real pixel size so they stay sharp."""
+    application = QGuiApplication.instance()
+    screens = application.screens() if application else []
+    return max([screen.devicePixelRatio() for screen in screens] or [1.0])
+
+
 def roundedPixmap(pixmap, radius):
     if radius <= 0:
         return pixmap
-    result = QPixmap(pixmap.size())
+    ratio = pixmap.devicePixelRatio() or 1.0
+    source = QPixmap(pixmap)
+    source.setDevicePixelRatio(1.0)
+    result = QPixmap(source.size())
     result.fill(Qt.transparent)
     painter = QPainter(result)
     painter.setRenderHint(QPainter.Antialiasing)
     path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, pixmap.width(), pixmap.height()), radius, radius)
+    path.addRoundedRect(QRectF(0, 0, source.width(), source.height()), radius * ratio, radius * ratio)
     painter.setClipPath(path)
-    painter.drawPixmap(0, 0, pixmap)
+    painter.drawPixmap(0, 0, source)
     painter.end()
+    result.setDevicePixelRatio(ratio)
     return result
 
 
@@ -367,9 +378,12 @@ def coverPixmap(path, size, seed=0, radius=4, glyph="music"):
     if pixmap.isNull():
         pixmap = placeholderCover(size, seed, glyph)
     else:
-        pixmap = pixmap.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-        if pixmap.width() != size or pixmap.height() != size:
-            pixmap = pixmap.copy((pixmap.width() - size) // 2, (pixmap.height() - size) // 2, size, size)
+        ratio = displayRatio()
+        physical = max(1, round(size * ratio))
+        pixmap = pixmap.scaled(physical, physical, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        if pixmap.width() != physical or pixmap.height() != physical:
+            pixmap = pixmap.copy((pixmap.width() - physical) // 2, (pixmap.height() - physical) // 2, physical, physical)
+        pixmap.setDevicePixelRatio(ratio)
     pixmap = roundedPixmap(pixmap, radius)
     _pixmapCache[cacheKey] = pixmap
     return pixmap
@@ -382,14 +396,18 @@ def mosaicPixmap(paths, size, seed=0, radius=4):
     cacheKey = ("mosaic", tuple(paths), size, radius)
     if cacheKey in _pixmapCache:
         return _pixmapCache[cacheKey]
-    half = size // 2
-    pixmap = QPixmap(size, size)
+    ratio = displayRatio()
+    physical = max(2, round(size * ratio))
+    half = physical // 2
+    pixmap = QPixmap(physical, physical)
     pixmap.fill(QColor(ELEVATED))
     painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
     for index, path in enumerate(paths):
-        tile = coverPixmap(path, half, radius=0)
-        painter.drawPixmap((index % 2) * half, (index // 2) * half, tile)
+        tile = coverPixmap(path, size // 2, radius=0)
+        painter.drawPixmap(QRectF((index % 2) * half, (index // 2) * half, half, half).toRect(), tile)
     painter.end()
+    pixmap.setDevicePixelRatio(ratio)
     pixmap = roundedPixmap(pixmap, radius)
     _pixmapCache[cacheKey] = pixmap
     return pixmap

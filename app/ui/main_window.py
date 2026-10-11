@@ -20,7 +20,6 @@ from ..downloader import DownloadManager
 from ..media_keys import MediaSession
 from ..session_link import parseCode
 from ..playlist_sync import SharedPlaylists
-from . import effects
 from ..session_link import linkFor
 from ..together import TogetherController
 from ..player import Player
@@ -397,7 +396,7 @@ class MainWindow(QMainWindow):
             page.refresh()
         current = self.player.currentSong()
         page.setCurrent(current.get("id") if current else None, self.player.isPlaying())
-        effects.switchPage(self.pages, page)
+        self.pages.setCurrentWidget(page)
         for navKey, button in self.navButtons.items():
             button.setChecked(navKey == key)
         if key != "playlist":

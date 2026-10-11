@@ -1066,7 +1066,7 @@ class SettingsDialog(QDialog):
         column = QVBoxLayout(page)
         column.setSpacing(10)
         self.effectChecks = {}
-        for key, text in (("fxTransitions", "Transizioni: pagine che sfumano, popup morbidi, card che si illuminano, bottoni che rimbalzano"),
+        for key, text in (("fxTransitions", "Transizioni: popup morbidi, card che si illuminano, bottoni che rimbalzano"),
                           ("fxCoverColors", "Colori dalla copertina: la barra e \"In riproduzione\" cambiano colore con la canzone"),
                           ("fxVisualizer", "Visualizer: barre che si muovono a ritmo"),
                           ("fxMicro", "Micro-effetti: cuore che esplode al like, copertina che pulsa sui bassi"),

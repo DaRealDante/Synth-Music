@@ -283,6 +283,10 @@ def publish():
     remoteTags = git("ls-remote", "--tags", "origin", check=False, capture=True).stdout
     if f"refs/tags/{tag}" in remoteTags:
         fail(f"La versione {version} e' gia' pubblicata. Serve una versione nuova (VERSION in app/config.py).")
+    if git("fetch", "origin", "main", check=False, capture=True).returncode == 0:
+        # GitHub may have commits made elsewhere (e.g. a friend's pull request): put this version on top of them,
+        # so the push is accepted. The files on disk (this new version) are what gets published.
+        git("reset", "--soft", "origin/main", check=False)
     git("add", "-A")
     git("commit", "-m", f"Synth Music {tag}", check=False)
     git("tag", "-f", tag)
