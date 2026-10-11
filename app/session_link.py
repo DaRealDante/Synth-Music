@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
 import zlib
@@ -125,6 +126,7 @@ class _BrokerConnection:
         self.connected = False
         self.attempt = 0
         self.startedAt = 0.0
+        self.lastError = ""
 
     @property
     def host(self):
@@ -162,15 +164,24 @@ class _BrokerConnection:
         index = self.index
 
         def onConnect(clientRef, userdata, flags, reasonCode, properties):
+            if reasonCode.is_failure:
+                self.lastError = f"rifiutato ({reasonCode})"
             self.link._connectionEvent.emit(index, attempt, not reasonCode.is_failure)
 
+        def onConnectFail(clientRef, userdata):
+            self.lastError = "connessione fallita (porta bloccata o server giù)"
+            self.link._connectionEvent.emit(index, attempt, False)
+
         def onDisconnect(clientRef, userdata, flags, reasonCode, properties):
+            if reasonCode.is_failure:
+                self.lastError = f"disconnesso ({reasonCode})"
             self.link._connectionEvent.emit(index, attempt, False)
 
         def onMessage(clientRef, userdata, message):
             self.link._incoming.emit(index, message.topic, bytes(message.payload))
 
         client.on_connect = onConnect
+        client.on_connect_fail = onConnectFail
         client.on_disconnect = onDisconnect
         client.on_message = onMessage
         self.client = client
@@ -178,6 +189,7 @@ class _BrokerConnection:
             client.connect_async(host, port, keepalive=30)
             client.loop_start()
         except Exception as error:
+            self.lastError = repr(error)
             print(f"[Link] {self.describe()} non raggiungibile: {error!r}")
 
     def drop(self, graceful):
@@ -187,12 +199,22 @@ class _BrokerConnection:
         self.attempt += 1
         if client is None:
             return
-        try:
-            if graceful:
-                client.disconnect()
-            client.loop_stop()
-        except Exception:
-            pass
+        client.on_connect = None
+        client.on_connect_fail = None
+        client.on_disconnect = None
+        client.on_message = None
+
+        def close():
+            # In the background: a server that never answers keeps paho's thread stuck in the handshake,
+            # and waiting for it here froze the whole app for up to 30 seconds.
+            try:
+                if graceful:
+                    client.disconnect()
+                client.loop_stop()
+            except Exception:
+                pass
+
+        threading.Thread(target=close, daemon=True).start()
 
     def publish(self, topic, data, retain):
         if self.client is not None:
@@ -296,11 +318,13 @@ class Link(QObject):
     def clearRetained(self, code, subtopic):
         self.retainedOut.pop((code, subtopic), None)
         box = self.boxes.get(code) or CodeBox(code)
-        infos = [connection.publish(f"{box.topicBase}/{subtopic}", b"", True) for connection in self.connections]
+        infos = [connection.publish(f"{box.topicBase}/{subtopic}", b"", True) for connection in self.connections
+                 if connection.connected]
+        deadline = time.monotonic() + 1.0
         for info in infos:
             try:
                 if info is not None:
-                    info.wait_for_publish(1.0)
+                    info.wait_for_publish(max(0.05, deadline - time.monotonic()))
             except Exception:
                 pass
 
@@ -319,7 +343,8 @@ class Link(QObject):
             return
         for connection in self.connections:
             if not connection.connected and time.monotonic() - connection.startedAt > self.switchSeconds:
-                print(f"[Link] {connection.describe()} non risponde, provo un'altra porta")
+                connection.lastError = connection.lastError or f"nessuna risposta in {self.switchSeconds}s"
+                print(f"[Link] {connection.describe()} non risponde ({connection.lastError}), provo un'altra porta")
                 connection.switchEndpoint()
 
     def _onConnectionEvent(self, index, attempt, success):
@@ -328,6 +353,8 @@ class Link(QObject):
             return
         if success:
             connection.connected = True
+            connection.lastError = ""
+            connection.loggedError = ""
             print(f"[Link] connesso a {connection.describe()}")
             for code, subtopics in self.subtopics.items():
                 box = self.boxes[code]
@@ -336,6 +363,9 @@ class Link(QObject):
             for (code, subtopic), data in self.retainedOut.items():
                 connection.publish(f"{self.boxes[code].topicBase}/{subtopic}", data, True)
         else:
+            if connection.lastError and connection.lastError != getattr(connection, "loggedError", ""):
+                connection.loggedError = connection.lastError
+                print(f"[Link] {connection.describe()}: {connection.lastError}")
             if connection.connected:
                 print(f"[Link] connessione persa con {connection.describe()}, riprovo")
                 connection.startedAt = time.monotonic()

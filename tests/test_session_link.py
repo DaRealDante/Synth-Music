@@ -240,3 +240,49 @@ def test_switchesToWebSocketPortWhenNormalPortIsBlocked(webSocketBroker):
 def test_defaultServersHaveWebSocketFallback():
     from app.session_link import DEFAULT_BROKERS
     assert all(len(endpoints) >= 2 and any(path for *_, path in endpoints) for endpoints in DEFAULT_BROKERS)
+
+
+def test_silentServerNeverFreezesTheApp():
+    """A firewall that swallows the connection (no answer) used to freeze the whole UI while switching port."""
+    import socket
+    import threading
+    import time
+    from PySide6.QtWidgets import QApplication
+    silent = socket.socket()
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(50)
+    port = silent.getsockname()[1]
+    held = []
+
+    def acceptForever():
+        while True:
+            try:
+                held.append(silent.accept())
+            except OSError:
+                return
+
+    threading.Thread(target=acceptForever, daemon=True).start()
+    previous = os.environ.get("SYNTH_BROKERS", "")
+    os.environ["SYNTH_BROKERS"] = f"127.0.0.1:{port}:1|127.0.0.1:{port}:1:/mqtt,127.0.0.1:{port}:1"
+    try:
+        link = Link()
+    finally:
+        os.environ["SYNTH_BROKERS"] = previous
+    link.switchSeconds = 1
+    link.watch(makeCode(), ["state"])
+    link.start()
+    worst = 0.0
+    last = time.monotonic()
+    deadline = last + 6
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
+        now = time.monotonic()
+        worst = max(worst, now - last)
+        last = now
+        time.sleep(0.01)
+    started = time.monotonic()
+    link.stop()
+    stopTime = time.monotonic() - started
+    silent.close()
+    assert worst < 0.5, f"UI bloccata per {worst:.1f}s"
+    assert stopTime < 0.5, f"stop bloccato per {stopTime:.1f}s"

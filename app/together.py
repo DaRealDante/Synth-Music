@@ -86,6 +86,8 @@ class TogetherController(QObject):
         self.pendingSeek = False
         self.joinedAt = 0
         self.recovery = None
+        self.trackSongs = {}
+        self.uncommitted = False
         self.publishedCoverKey = None
         self.coverRequests = set()
 
@@ -157,6 +159,7 @@ class TogetherController(QObject):
             self.leaveRoom()
         self.code = code
         self.state = None
+        self.trackSongs = {}
         self.publishedCoverKey = None
         self.version = 0
         self.peers = {}
@@ -426,6 +429,9 @@ class TogetherController(QObject):
                 self.player.mediaPlayer.pause()
         finally:
             self.applying -= 1
+            if self.uncommitted:
+                self.uncommitted = False
+                self.database.connection.commit()
 
     # ---------- covers of friends' songs ----------
     def _songsWithoutCover(self, key):
@@ -477,6 +483,9 @@ class TogetherController(QObject):
                 if song.get("id") and song.get("hidden"):
                     self.database.updateSong(song["id"], cover=coverPath)
                 song["cover"] = coverPath
+            for cacheKey, cached in self.trackSongs.items():
+                if cacheKey[0] == key:
+                    cached["cover"] = coverPath
             if current is not None and any(song is current for song in songs):
                 self.player.songChanged.emit(current)
             self.player.queueChanged.emit()
@@ -484,7 +493,14 @@ class TogetherController(QObject):
             self.applying -= 1
 
     def _songForTrack(self, track):
-        """The same song in my library (YouTube link, then title + artist), otherwise a hidden streaming copy."""
+        """The same song in my library (YouTube link, then title + artist), otherwise a hidden streaming copy.
+        Remembered per room: every state message used to search the whole library again for each song in the queue."""
+        cacheKey = (track.get("key"), track.get("fileId"))
+        cached = self.trackSongs.get(cacheKey)
+        if cached is not None:
+            mapped = dict(cached)
+            mapped["_roomTrack"] = dict(track)
+            return mapped
         song = None
         if track.get("url"):
             song = self.database.findSongByUrl(track["url"])
@@ -494,14 +510,18 @@ class TogetherController(QObject):
             query = track.get("query") or f"ytsearch1:{track.get('artist') or ''} - {track.get('title') or ''} audio"
             songId = self.database.addStreamSong(f"roomfile:{track['fileId']}|{query}", track.get("title") or "Senza titolo",
                                                  track.get("artist") or "", track.get("album") or "", track.get("duration") or 0,
-                                                 None, hidden=True)
+                                                 None, hidden=True, commit=False)
+            self.uncommitted = True
             song = self.database.getSong(songId)
         if song is None:
             target = track.get("url") or track.get("query") or \
                 f"ytsearch1:{track.get('artist') or ''} - {track.get('title') or ''} audio".replace("ytsearch1: - ", "ytsearch1:")
             songId = self.database.addStreamSong(target, track.get("title") or "Senza titolo", track.get("artist") or "",
-                                                 track.get("album") or "", track.get("duration") or 0, None, hidden=True)
+                                                 track.get("album") or "", track.get("duration") or 0, None, hidden=True,
+                                                 commit=False)
+            self.uncommitted = True
             song = self.database.getSong(songId)
+        self.trackSongs[cacheKey] = dict(song)
         mapped = dict(song)
         mapped["_roomTrack"] = dict(track)
         return mapped

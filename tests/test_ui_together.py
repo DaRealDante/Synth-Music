@@ -63,3 +63,35 @@ def test_sharePlaylistFromMenuAndJoinWithCode(window, monkeypatch):
     from PySide6.QtGui import QGuiApplication
     assert QGuiApplication.clipboard().text() == "synthmusic://join/" + code
     assert window.handleCode("ciao") is False
+
+
+def test_popupStaysOnTheButtonsMonitor(window, monkeypatch):
+    """Monitor on the left of the main one = negative coordinates: the popup must not jump to the other screen."""
+    from PySide6.QtCore import QPoint, QRect
+    window.showTogether()
+    popup = window.togetherPopup
+    anchor = popup.anchor
+    fakeArea = QRect(-1920, 0, 1920, 1040)
+
+    class FakeScreen:
+        def availableGeometry(self):
+            return fakeArea
+
+    monkeypatch.setattr(anchor, "screen", lambda: FakeScreen())
+    monkeypatch.setattr(anchor, "mapToGlobal", lambda point: QPoint(-300, 950))
+    popup._place()
+    assert fakeArea.contains(popup.geometry().topLeft()) and popup.x() < 0
+    popup.hide()
+
+
+def test_copyDiagnosticsFromRoom(window):
+    from PySide6.QtGui import QGuiApplication
+    window.together.createRoom()
+    assert waitFor(window.together.link.isConnected)
+    print("[Link] riga di prova per la diagnostica")
+    window.showTogether()
+    window.togetherPopup._copyDiagnostics()
+    text = QGuiApplication.clipboard().text()
+    assert text.startswith("Synth Music ") and "CONNESSO" in text and "Stanza: sì" in text
+    window.together.leaveRoom()
+    window.togetherPopup.hide()

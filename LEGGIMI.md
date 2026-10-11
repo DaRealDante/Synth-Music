@@ -1,4 +1,4 @@
-# Synth Music v1.9.3
+# Synth Music v1.9.4
 
 ## Installare / aggiornare (tu)
 Doppio click su **`INSTALLA_E_AGGIORNA.bat`**. Fa tutto da solo:
@@ -58,7 +58,14 @@ Il motore YouTube (yt-dlp) si aggiorna da solo una volta al giorno: non serve ri
 - Le canzoni in streaming hanno "Streaming ·" sotto il titolo. Menu → *Scarica sul PC*; al contrario, su una canzone scaricata *Solo streaming (elimina il file)*
 - Taglia audio ed "Esporta con effetti" richiedono il file: scarica prima la canzone
 
+## Novità 1.9.4
+- Stanza → **Copia diagnostica**: copia lo stato dei server e il log, da incollare in chat se qualcosa non va
+- Il log ora tiene orario e storico (`%APPDATA%\SynthMusic\log.txt`) e segna perché un server non si collega
+
 ## Novità 1.9.3 (fix stanze)
+- **Niente più lag**: se un server non rispondeva, l'app si bloccava fino a 30 secondi ogni volta che cambiava porta (era questo il lag e la "Connessione" infinita)
+- Entrare in una stanza con code lunghe è molto più leggero
+- Il pannello della stanza resta sullo schermo dell'app (prima con 2 monitor finiva sull'altro)
 - **Stanze divise risolte**: l'app ora si collega a **tutti e 3 i server insieme** (prima uno solo: se tu e il tuo amico finivate su server diversi, eravate in due stanze separate e vi vedevate "a intermittenza")
 - Se una rete blocca la porta normale, prova da sola la **porta web** (come un sito): niente più "Connessione in corso..." infinito. Il pallino mostra a quanti server sei connesso
 - **Silenzio con la barra che avanza**: se lo streaming fallisce, la canzone si ricarica da sola (link nuovo, poi download temporaneo) invece di far scorrere la barra a vuoto
