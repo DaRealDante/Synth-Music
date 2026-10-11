@@ -537,28 +537,54 @@ class WebResultWidget(QFrame):
         self.previewButton.clicked.connect(lambda: self.page.togglePreview(self))
         self.openButton = _iconButton("globe", "Apri su YouTube", 36, 18)
         self.openButton.clicked.connect(lambda: webbrowser.open(entry["url"]))
-        self.playlistButton = _iconButton("add", "Scarica in una playlist", 36, 18)
+        self.playlistButton = _iconButton("add", "Streaming, coda e playlist", 36, 18)
         self.playlistButton.clicked.connect(self._playlistMenu)
-        self.downloadButton = QPushButton("Scarica")
-        self.downloadButton.setIcon(theme.icon("download", "#000", 16))
+        streamOnly = bool(settings.get("streamOnly"))
+        self.downloadButton = QPushButton("Aggiungi" if streamOnly else "Scarica")
+        self.downloadButton.setIcon(theme.icon("cloud" if streamOnly else "download", "#000", 16))
+        self.downloadButton.setToolTip("Aggiungi alla libreria solo in streaming (non scarica)" if streamOnly else "Scarica la canzone")
         self.downloadButton.setObjectName("accent")
         self.downloadButton.setMinimumWidth(104)
-        self.downloadButton.clicked.connect(lambda: self.page.window.downloads.enqueue(entry))
+        self.downloadButton.clicked.connect(self._onMainButton)
         for widget in (self.previewButton, self.openButton, self.playlistButton, self.downloadButton):
             layout.addWidget(widget)
 
+    def _onMainButton(self):
+        window = self.page.window
+        if settings.get("streamOnly"):
+            window.addStreamEntries([self.entry])
+            self.downloadButton.setText("Aggiunto")
+            self.downloadButton.setIcon(theme.icon("check", "#000", 16))
+        else:
+            window.downloads.enqueue(self.entry)
+
+    def _addTo(self, playlistId):
+        window = self.page.window
+        if settings.get("streamOnly"):
+            window.addStreamEntries([self.entry], playlistId)
+        else:
+            window.downloads.enqueue(self.entry, playlistId)
+
     def _playlistMenu(self):
+        window = self.page.window
         menu = QMenu(self)
+        menu.addAction(theme.icon("play"), "Riproduci in streaming", lambda: window.addStreamEntries([self.entry], play=True))
+        menu.addAction(theme.icon("queue"), "Aggiungi alla coda (streaming)", lambda: window.addStreamEntries([self.entry], queue=True))
+        menu.addAction(theme.icon("cloud"), "Salva in libreria (solo streaming)", lambda: window.addStreamEntries([self.entry]))
+        streamMenu = menu.addMenu(theme.icon("cloud"), "Aggiungi a playlist (solo streaming)")
+        for playlist in window.database.playlists():
+            streamMenu.addAction(playlist["name"], lambda pid=playlist["id"]: window.addStreamEntries([self.entry], pid))
+        menu.addSeparator()
         menu.addAction(theme.icon("add"), "Nuova playlist...", self._toNewPlaylist)
         menu.addSeparator()
-        for playlist in self.page.window.database.playlists():
-            menu.addAction(playlist["name"], lambda pid=playlist["id"]: self.page.window.downloads.enqueue(self.entry, pid))
+        for playlist in window.database.playlists():
+            menu.addAction(playlist["name"], lambda pid=playlist["id"]: self._addTo(pid))
         menu.exec(self.playlistButton.mapToGlobal(self.playlistButton.rect().bottomLeft()))
 
     def _toNewPlaylist(self):
         playlistId = self.page.window.createPlaylist()
         if playlistId:
-            self.page.window.downloads.enqueue(self.entry, playlistId)
+            self._addTo(playlistId)
 
     def setThumbnail(self, pixmap):
         scaled = pixmap.scaled(112, 63, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
@@ -826,7 +852,7 @@ class SearchPage(Page):
             for job in self.window.downloads.jobs:
                 if downloader.jobKey(job["entry"]) == key:
                     row.updateJob(job)
-            if self.window.database.findSong(trackInfo["title"], trackInfo["mainArtist"]):
+            if self.window.database.findSong(trackInfo["title"], trackInfo["mainArtist"], fileOnly=not settings.get("streamOnly")):
                 row.markInLibrary()
             self._loadThumbnail(row, trackInfo.get("image"))
 
@@ -864,9 +890,12 @@ class SearchPage(Page):
             return
         playlistId = self.window.database.createPlaylist(self.currentPlaylistInfo["playlistTitle"], "Importata da YouTube")
         self.window.refreshPlaylists()
-        for entry in self.currentPlaylistInfo["entries"]:
-            self.window.downloads.enqueue(entry, playlistId)
-        self.window.showStatus(f"Download di {len(self.currentPlaylistInfo['entries'])} brani avviato")
+        if settings.get("streamOnly"):
+            self.window.addStreamEntries(self.currentPlaylistInfo["entries"], playlistId)
+        else:
+            for entry in self.currentPlaylistInfo["entries"]:
+                self.window.downloads.enqueue(entry, playlistId)
+            self.window.showStatus(f"Download di {len(self.currentPlaylistInfo['entries'])} brani avviato")
         self.playlistBanner.hide()
 
     # ---------- streaming preview ----------
@@ -922,17 +951,7 @@ class SearchPage(Page):
 
 
 def _streamUrl(url):
-    import yt_dlp
-    options = downloader._baseOptions()
-    options.update({"format": "bestaudio[ext=m4a]/bestaudio/best", "noplaylist": True})
-    with yt_dlp.YoutubeDL(options) as youtube:
-        info = youtube.extract_info(url, download=False)
-    streamUrl = info.get("url")
-    if not streamUrl and info.get("requested_formats"):
-        streamUrl = info["requested_formats"][0].get("url")
-    if not streamUrl:
-        raise RuntimeError("stream non trovato")
-    return streamUrl
+    return downloader.resolveStream(url)["url"]
 
 
 class DownloadsPage(Page):

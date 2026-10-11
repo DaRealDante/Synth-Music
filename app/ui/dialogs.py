@@ -494,6 +494,11 @@ class SettingsDialog(QDialog):
         self.copyCheck = QCheckBox("Copia i file importati nella cartella musica")
         self.copyCheck.setChecked(bool(settings.get("copyImported")))
         form.addRow("", self.copyCheck)
+        self.streamOnlyCheck = QCheckBox("Non scaricare: aggiungi le canzoni da YouTube solo in streaming")
+        self.streamOnlyCheck.setToolTip("Le canzoni non occupano spazio ma servono internet per ascoltarle.\n"
+                                        "Puoi sempre scaricarne una dal menu della canzone → Scarica sul PC.")
+        self.streamOnlyCheck.setChecked(bool(settings.get("streamOnly")))
+        form.addRow("", self.streamOnlyCheck)
         self.autoVideoCheck = QCheckBox("Salva automaticamente il video delle canzoni scaricate")
         self.autoVideoCheck.setChecked(bool(settings.get("autoVideo")))
         form.addRow("", self.autoVideoCheck)
@@ -512,6 +517,10 @@ class SettingsDialog(QDialog):
         form.addRow("", self.autoLyricsCheck)
         layout.addLayout(form)
         infoRow = QHBoxLayout()
+        profileButton = QPushButton("Profilo...")
+        profileButton.setToolTip("Nome e foto che vedono gli amici in \"Ascolta insieme\"")
+        profileButton.clicked.connect(self._editProfile)
+        infoRow.addWidget(profileButton)
         dataButton = QPushButton("Apri cartella dati")
         dataButton.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(DATA_DIR)))
         infoRow.addWidget(dataButton)
@@ -557,6 +566,11 @@ class SettingsDialog(QDialog):
         if self.parent():
             self.parent().close()
 
+    def _editProfile(self):
+        from .together_popup import ProfileDialog
+        if ProfileDialog(self).exec() == ProfileDialog.Accepted and self.parent() is not None and hasattr(self.parent(), "together"):
+            self.parent().together.updateProfile()
+
     def _browse(self):
         folderPath = QFileDialog.getExistingDirectory(self, "Scegli cartella musica", self.folderEdit.text())
         if folderPath:
@@ -568,6 +582,7 @@ class SettingsDialog(QDialog):
         settings.set("searchResults", self.resultsSpin.value())
         settings.set("copyImported", self.copyCheck.isChecked())
         settings.set("autoVideo", self.autoVideoCheck.isChecked())
+        settings.set("streamOnly", self.streamOnlyCheck.isChecked())
         settings.set("videoQuality", self.videoQualityCombo.currentText())
         settings.set("autoLyrics", self.autoLyricsCheck.isChecked())
         settings.set("pauseVideoInBackground", self.pauseVideoCheck.isChecked())

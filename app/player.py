@@ -5,6 +5,18 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QMediaPlayer
 
 from .audio_engine import AudioEngine
+from .database import isStreamPath, streamTarget
+from .workers import runInBackground
+
+
+def _defaultStreamResolver(target, useCache=True):
+    from .downloader import resolveStream
+    return resolveStream(target, useCache)
+
+
+def _forgetStream(target):
+    from .downloader import forgetStream
+    forgetStream(target)
 
 REPEAT_OFF, REPEAT_ALL, REPEAT_ONE = 0, 1, 2
 
@@ -21,6 +33,9 @@ class Player(QObject):
     playbackError = Signal(str)
     songStarted = Signal(int)
     effectsApplied = Signal(object)
+    loadingChanged = Signal(bool)
+    seeked = Signal(int)
+    songLoaded = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -39,6 +54,12 @@ class Player(QObject):
         self.pendingSeek = None
         self.consecutiveErrors = 0
         self.effectsProvider = None
+        self.streamResolver = _defaultStreamResolver
+        self.loading = False
+        self.loadGeneration = 0
+        self.loadAutoplay = False
+        self.streamRetriedFor = None
+        self.skipOnError = True
 
         self.loopTimer = QTimer(self)
         self.loopTimer.setInterval(15)
@@ -174,25 +195,75 @@ class Player(QObject):
         if song is None:
             return
         self.setLoop(None)
+        self.loadGeneration += 1
+        if self.streamRetriedFor is not None and self.streamRetriedFor != song.get("id"):
+            self.streamRetriedFor = None
+        if isStreamPath(song["path"]):
+            self._loadStream(song, autoplay, startPosition, self.loadGeneration)
+            return
+        self._setLoading(False)
         if not os.path.isfile(song["path"]):
             self.playbackError.emit(f"File non trovato: {song['path']}")
             self.songChanged.emit(song)
-            if autoplay:
+            if autoplay and self.skipOnError:
                 self.consecutiveErrors += 1
                 if self.consecutiveErrors < len(self.queue):
                     QTimer.singleShot(50, self.next)
             return
+        self._startSource(song, QUrl.fromLocalFile(os.path.abspath(song["path"])), autoplay, startPosition)
+
+    def _startSource(self, song, url, autoplay, startPosition, headers=None, durationHintMs=0):
         self.pendingSeek = startPosition if startPosition > 0 else None
         if self.effectsProvider is not None:
             effects = self.effectsProvider(song)
             self.mediaPlayer.presetRate(effects["rate"], effects["keepPitch"])
             self.mediaPlayer.setReverb(effects["reverbWet"], effects["reverbSize"])
             self.effectsApplied.emit(effects)
-        self.mediaPlayer.setSource(QUrl.fromLocalFile(os.path.abspath(song["path"])))
+        self.mediaPlayer.sourceHeaders = dict(headers or {})
+        self.mediaPlayer.durationHintMs = int(durationHintMs or 0)
+        self.mediaPlayer.setSource(url)
         self.songChanged.emit(song)
         if autoplay:
             self.mediaPlayer.play()
             self.songStarted.emit(song["id"])
+        self.songLoaded.emit(song)
+
+    def _setLoading(self, loading):
+        if loading != self.loading:
+            self.loading = loading
+            self.loadingChanged.emit(loading)
+
+    def _loadStream(self, song, autoplay, startPosition, generation, useCache=True):
+        self.loadAutoplay = autoplay
+        if not self.mediaPlayer.source().isEmpty():
+            self.mediaPlayer.stop()
+            self.mediaPlayer.setSource(QUrl())
+        self._setLoading(True)
+        self.songChanged.emit(song)
+        target = streamTarget(song["path"])
+        runInBackground(
+            self.streamResolver, target, useCache,
+            onFinished=lambda info: self._onStreamResolved(generation, song, info, startPosition),
+            onError=lambda message: self._onStreamFailed(generation, song, message),
+        )
+
+    def _onStreamResolved(self, generation, song, info, startPosition):
+        if generation != self.loadGeneration or self.currentSong() is not song:
+            return
+        self._setLoading(False)
+        durationHintMs = int((info.get("duration") or song.get("duration") or 0) * 1000)
+        self._startSource(song, QUrl(info["url"]), self.loadAutoplay, startPosition, info.get("headers"), durationHintMs)
+
+    def _onStreamFailed(self, generation, song, message):
+        if generation != self.loadGeneration or self.currentSong() is not song:
+            return
+        self._setLoading(False)
+        autoplay = self.loadAutoplay
+        if autoplay:
+            self.playbackError.emit(f"Streaming non disponibile: {message[:150]}")
+            self.consecutiveErrors += 1
+            if self.skipOnError and self.consecutiveErrors < len(self.queue):
+                QTimer.singleShot(50, self.next)
 
     def restoreSession(self, songs, currentIndex, position):
         self.queue = [dict(song) for song in songs]
@@ -203,6 +274,9 @@ class Player(QObject):
 
     def togglePlay(self):
         if self.currentSong() is None:
+            return
+        if self.loading:
+            self.loadAutoplay = not self.loadAutoplay
             return
         if self.isPlaying():
             self.mediaPlayer.pause()
@@ -217,6 +291,8 @@ class Player(QObject):
             self.togglePlay()
 
     def pause(self):
+        if self.loading:
+            self.loadAutoplay = False
         self.mediaPlayer.pause()
 
     def next(self, automatic=False):
@@ -245,7 +321,7 @@ class Player(QObject):
         if not self.queue:
             return
         if self.mediaPlayer.position() > 3000 or self.currentIndex == 0:
-            self.mediaPlayer.setPosition(self.activeLoop["startMs"] if self.activeLoop else 0)
+            self.seek(self.activeLoop["startMs"] if self.activeLoop else 0)
             return
         self.currentIndex -= 1
         self.queueChanged.emit()
@@ -253,6 +329,7 @@ class Player(QObject):
 
     def seek(self, positionMs):
         self.mediaPlayer.setPosition(max(0, int(positionMs)))
+        self.seeked.emit(max(0, int(positionMs)))
 
     def seekRelative(self, deltaMs):
         self.seek(self.mediaPlayer.position() + deltaMs)
@@ -356,6 +433,7 @@ class Player(QObject):
             if self.repeatMode == REPEAT_ONE:
                 self.mediaPlayer.setPosition(0)
                 self.mediaPlayer.play()
+                self.seeked.emit(0)
                 self.songStarted.emit(self.currentSong()["id"])
             else:
                 self.next(automatic=True)
@@ -363,9 +441,17 @@ class Player(QObject):
     def _onError(self, error, message):
         if error == QMediaPlayer.NoError:
             return
+        song = self.currentSong()
+        if song is not None and isStreamPath(song["path"]) and error != QMediaPlayer.ResourceError \
+                and self.streamRetriedFor != song.get("id"):
+            self.streamRetriedFor = song.get("id")
+            _forgetStream(streamTarget(song["path"]))
+            self.loadGeneration += 1
+            self._loadStream(song, True, self.mediaPlayer.position(), self.loadGeneration, useCache=False)
+            return
         self.playbackError.emit(message or "Errore di riproduzione")
         if error == QMediaPlayer.ResourceError:
             return
         self.consecutiveErrors += 1
-        if self.consecutiveErrors < max(2, len(self.queue)):
+        if self.skipOnError and self.consecutiveErrors < max(2, len(self.queue)):
             QTimer.singleShot(300, lambda: self.next(automatic=True))

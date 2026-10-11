@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS loops (
     createdAt REAL
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS sharedPlaylists (
+    playlistId INTEGER PRIMARY KEY REFERENCES playlists(id) ON DELETE CASCADE,
+    code TEXT NOT NULL,
+    snapshot TEXT
+);
 CREATE INDEX IF NOT EXISTS idxPlaylistSongs ON playlistSongs(playlistId, position);
 CREATE INDEX IF NOT EXISTS idxLoops ON loops(songId);
 """
@@ -49,17 +54,28 @@ CREATE INDEX IF NOT EXISTS idxLoops ON loops(songId);
 SCHEMA_VERSION = 2
 SONG_FIELDS = ("title", "artist", "album", "duration", "cover", "source", "url", "favorite", "path",
                "lyrics", "syncedLyrics", "lyricsChecked", "lyricsAuto", "videoPath", "videoUrl", "videoAuto", "videoChecked", "cutInfo",
-               "songRate", "keepPitch", "reverbWet", "reverbSize")
+               "songRate", "keepPitch", "reverbWet", "reverbSize", "hidden")
 SONG_COLUMNS_V2 = {
     "lyrics": "TEXT", "syncedLyrics": "TEXT", "lyricsChecked": "INTEGER DEFAULT 0", "lyricsAuto": "INTEGER DEFAULT 1",
     "videoPath": "TEXT", "videoUrl": "TEXT", "videoAuto": "INTEGER DEFAULT 1", "videoChecked": "INTEGER DEFAULT 0",
     "cutInfo": "TEXT",
     "songRate": "REAL DEFAULT 1.0", "keepPitch": "INTEGER DEFAULT 1", "reverbWet": "REAL DEFAULT 0", "reverbSize": "REAL DEFAULT 1.8",
+    "hidden": "INTEGER DEFAULT 0",
 }
+STREAM_PREFIX = "stream:"
+
+
+def isStreamPath(path):
+    return bool(path) and str(path).startswith(STREAM_PREFIX)
+
+
+def streamTarget(path):
+    return str(path)[len(STREAM_PREFIX):] if isStreamPath(path) else None
 
 
 class Database:
     def __init__(self, dbPath=DB_PATH):
+        self.playlistListener = None
         self.connection = sqlite3.connect(dbPath)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
@@ -75,6 +91,9 @@ class Database:
         for columnName, columnType in SONG_COLUMNS_V2.items():
             if columnName not in existingColumns:
                 self.connection.execute(f"ALTER TABLE songs ADD COLUMN {columnName} {columnType}")
+        entryColumns = {info["name"] for info in self.connection.execute("PRAGMA table_info(playlistSongs)").fetchall()}
+        if "shareKey" not in entryColumns:
+            self.connection.execute("ALTER TABLE playlistSongs ADD COLUMN shareKey TEXT")
         if currentVersion != SCHEMA_VERSION:
             self.connection.execute("INSERT OR REPLACE INTO meta VALUES ('schemaVersion', ?)", (str(SCHEMA_VERSION),))
 
@@ -93,6 +112,50 @@ class Database:
         self.connection.commit()
         return cursor.lastrowid
 
+    def addStreamSong(self, target, title, artist="", album="", duration=0, cover=None, hidden=False):
+        path = STREAM_PREFIX + target
+        existing = self.connection.execute("SELECT id FROM songs WHERE path=?", (path,)).fetchone()
+        if existing:
+            if not hidden:
+                self.connection.execute("UPDATE songs SET hidden=0 WHERE id=?", (existing["id"],))
+                self.connection.commit()
+            return existing["id"]
+        url = target if target.startswith("http") else None
+        cursor = self.connection.execute(
+            "INSERT INTO songs (path, title, artist, album, duration, cover, source, url, addedAt, hidden) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (path, title, artist, album, duration, cover, "stream", url, time.time(), 1 if hidden else 0),
+        )
+        self.connection.commit()
+        return cursor.lastrowid
+
+    def findSongByUrl(self, url):
+        if not url:
+            return None
+        rows = self._rows("SELECT * FROM songs WHERE url=? ORDER BY (path LIKE 'stream:%'), hidden LIMIT 1", (url,))
+        return rows[0] if rows else None
+
+    def mergeSongInto(self, duplicateId, keptId):
+        """Moves playlist entries and loops of a duplicate song row to another row, then deletes the duplicate."""
+        affected = self._playlistsContaining([duplicateId])
+        self.connection.execute("UPDATE playlistSongs SET songId=? WHERE songId=?", (keptId, duplicateId))
+        self.connection.execute("UPDATE loops SET songId=? WHERE songId=?", (keptId, duplicateId))
+        self.connection.execute("DELETE FROM songs WHERE id=?", (duplicateId,))
+        self.connection.commit()
+        self._notifyPlaylists(affected)
+
+    def songByPath(self, path):
+        rows = self._rows("SELECT * FROM songs WHERE path=?", (path,))
+        return rows[0] if rows else None
+
+    def _notifyPlaylists(self, playlistIds):
+        if self.playlistListener is None:
+            return
+        for playlistId in dict.fromkeys(playlistIds):
+            try:
+                self.playlistListener(playlistId)
+            except Exception as error:
+                print(f"[Database] playlistListener: {error!r}")
+
     def getSong(self, songId):
         rows = self._rows("SELECT * FROM songs WHERE id=?", (songId,))
         return rows[0] if rows else None
@@ -105,30 +168,32 @@ class Database:
         return [songMap[songId] for songId in songIds if songId in songMap]
 
     def allSongs(self):
-        return self._rows("SELECT * FROM songs ORDER BY addedAt DESC")
+        return self._rows("SELECT * FROM songs WHERE hidden=0 ORDER BY addedAt DESC")
 
     def favoriteSongs(self):
-        return self._rows("SELECT * FROM songs WHERE favorite=1 ORDER BY title COLLATE NOCASE")
+        return self._rows("SELECT * FROM songs WHERE favorite=1 AND hidden=0 ORDER BY title COLLATE NOCASE")
 
     def recentSongs(self, limit=12):
-        return self._rows("SELECT * FROM songs ORDER BY addedAt DESC LIMIT ?", (limit,))
+        return self._rows("SELECT * FROM songs WHERE hidden=0 ORDER BY addedAt DESC LIMIT ?", (limit,))
 
     def mostPlayed(self, limit=12):
-        return self._rows("SELECT * FROM songs WHERE playCount>0 ORDER BY playCount DESC LIMIT ?", (limit,))
+        return self._rows("SELECT * FROM songs WHERE playCount>0 AND hidden=0 ORDER BY playCount DESC LIMIT ?", (limit,))
 
     def recentlyPlayed(self, limit=12):
-        return self._rows("SELECT * FROM songs WHERE lastPlayed IS NOT NULL ORDER BY lastPlayed DESC LIMIT ?", (limit,))
+        return self._rows("SELECT * FROM songs WHERE lastPlayed IS NOT NULL AND hidden=0 ORDER BY lastPlayed DESC LIMIT ?", (limit,))
 
     def searchSongs(self, text):
         likeText = f"%{text}%"
         return self._rows(
-            "SELECT * FROM songs WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? ORDER BY title COLLATE NOCASE",
+            "SELECT * FROM songs WHERE hidden=0 AND (title LIKE ? OR artist LIKE ? OR album LIKE ?) ORDER BY title COLLATE NOCASE",
             (likeText, likeText, likeText),
         )
 
-    def findSong(self, title, artist=""):
+    def findSong(self, title, artist="", fileOnly=False):
+        fileFilter = " AND hidden=0 AND path NOT LIKE 'stream:%'" if fileOnly else ""
         rows = self._rows(
-            "SELECT * FROM songs WHERE lower(title)=lower(?) AND (?='' OR lower(artist) LIKE lower(?)) LIMIT 1",
+            "SELECT * FROM songs WHERE lower(title)=lower(?) AND (?='' OR lower(artist) LIKE lower(?))" + fileFilter +
+            " ORDER BY (path LIKE 'stream:%'), hidden LIMIT 1",
             (title.strip(), artist.strip(), f"%{artist.strip()}%"),
         )
         return rows[0] if rows else None
@@ -151,8 +216,17 @@ class Database:
         self.connection.commit()
 
     def deleteSongs(self, songIds):
+        affected = self._playlistsContaining(songIds)
         self.connection.executemany("DELETE FROM songs WHERE id=?", [(songId,) for songId in songIds])
         self.connection.commit()
+        self._notifyPlaylists(affected)
+
+    def _playlistsContaining(self, songIds):
+        if not songIds:
+            return []
+        placeholders = ",".join("?" * len(songIds))
+        return [row["playlistId"] for row in self._rows(
+            f"SELECT DISTINCT playlistId FROM playlistSongs WHERE songId IN ({placeholders})", list(songIds))]
 
     # ---------- playlists ----------
     def createPlaylist(self, name, description="", cover=None):
@@ -179,6 +253,7 @@ class Database:
             "UPDATE playlists SET name=?, description=?, cover=? WHERE id=?", (name, description, cover, playlistId)
         )
         self.connection.commit()
+        self._notifyPlaylists([playlistId])
 
     def deletePlaylist(self, playlistId):
         self.connection.execute("DELETE FROM playlists WHERE id=?", (playlistId,))
@@ -186,7 +261,7 @@ class Database:
 
     def playlistSongs(self, playlistId):
         return self._rows(
-            "SELECT s.*, ps.id AS entryId, ps.position AS entryPosition FROM playlistSongs ps "
+            "SELECT s.*, ps.id AS entryId, ps.position AS entryPosition, ps.shareKey AS shareKey FROM playlistSongs ps "
             "JOIN songs s ON s.id = ps.songId WHERE ps.playlistId=? ORDER BY ps.position",
             (playlistId,),
         )
@@ -200,16 +275,41 @@ class Database:
             [(playlistId, songId, nextPosition + offset) for offset, songId in enumerate(songIds)],
         )
         self.connection.commit()
+        self._notifyPlaylists([playlistId])
+
+    def addEntry(self, playlistId, songId, shareKey=None):
+        nextPosition = self.connection.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM playlistSongs WHERE playlistId=?", (playlistId,)
+        ).fetchone()[0]
+        cursor = self.connection.execute("INSERT INTO playlistSongs (playlistId, songId, position, shareKey) VALUES (?,?,?,?)",
+                                         (playlistId, songId, nextPosition, shareKey))
+        self.connection.commit()
+        self._notifyPlaylists([playlistId])
+        return cursor.lastrowid
+
+    def setEntryKeys(self, entryKeys):
+        self.connection.executemany("UPDATE playlistSongs SET shareKey=? WHERE id=?", [(key, entryId) for entryId, key in entryKeys])
+        self.connection.commit()
 
     def removeEntries(self, entryIds):
+        affected = self._playlistsOfEntries(entryIds)
         self.connection.executemany("DELETE FROM playlistSongs WHERE id=?", [(entryId,) for entryId in entryIds])
         self.connection.commit()
+        self._notifyPlaylists(affected)
+
+    def _playlistsOfEntries(self, entryIds):
+        if not entryIds:
+            return []
+        placeholders = ",".join("?" * len(entryIds))
+        return [row["playlistId"] for row in self._rows(
+            f"SELECT DISTINCT playlistId FROM playlistSongs WHERE id IN ({placeholders})", list(entryIds))]
 
     def setPlaylistOrder(self, entryIds):
         self.connection.executemany(
             "UPDATE playlistSongs SET position=? WHERE id=?", [(index, entryId) for index, entryId in enumerate(entryIds)]
         )
         self.connection.commit()
+        self._notifyPlaylists(self._playlistsOfEntries(entryIds))
 
     def setPlaylistsOrder(self, playlistIds):
         self.connection.executemany(
@@ -223,6 +323,27 @@ class Database:
             "WHERE ps.playlistId=? AND s.cover IS NOT NULL GROUP BY s.cover ORDER BY MIN(ps.position) LIMIT ?",
             (playlistId, limit),
         )
+
+    # ---------- shared playlists ----------
+    def setShared(self, playlistId, code, snapshot):
+        self.connection.execute("INSERT OR REPLACE INTO sharedPlaylists (playlistId, code, snapshot) VALUES (?,?,?)",
+                                (playlistId, code, snapshot))
+        self.connection.commit()
+
+    def sharedPlaylist(self, playlistId):
+        rows = self._rows("SELECT * FROM sharedPlaylists WHERE playlistId=?", (playlistId,))
+        return rows[0] if rows else None
+
+    def sharedPlaylistByCode(self, code):
+        rows = self._rows("SELECT * FROM sharedPlaylists WHERE code=?", (code,))
+        return rows[0] if rows else None
+
+    def sharedPlaylists(self):
+        return self._rows("SELECT sp.* FROM sharedPlaylists sp JOIN playlists p ON p.id = sp.playlistId")
+
+    def unshare(self, playlistId):
+        self.connection.execute("DELETE FROM sharedPlaylists WHERE playlistId=?", (playlistId,))
+        self.connection.commit()
 
     # ---------- loops ----------
     def loops(self, songId):

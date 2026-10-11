@@ -123,6 +123,7 @@ ICON_CODES = {
     "close": ("", "✕"), "check": ("", "✓"), "panel": ("", "▣"), "speed": ("", "⏩"),
     "timer": ("", "⏲"), "file": ("", "📄"), "refresh": ("", "⟳"), "back": ("", "←"),
     "link": ("", "🔗"), "mic": ("", "🎤"), "flagA": ("", "A"), "info": ("", "ⓘ"), "eq": ("\uE9E9", "≋"),
+    "cloud": ("\uE753", "☁"), "people": ("\uE716", "👥"), "person": ("\uE77B", "👤"), "share": ("\uE72D", "⇪"),
 }
 
 _iconCache = {}

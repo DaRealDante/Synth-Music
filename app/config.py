@@ -4,7 +4,7 @@ import shutil
 import sys
 
 APP_NAME = "Synth Music"
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 UPDATE_REPO = "DaRealDante/Synth-Music"  # "utente/repository" su GitHub: lo compila da solo PUBBLICA_AGGIORNAMENTO.bat
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".webm"}
@@ -18,6 +18,8 @@ def resourceDir():
 
 
 def _dataRoot():
+    if os.environ.get("SYNTH_DATA_DIR"):
+        return os.environ["SYNTH_DATA_DIR"]
     if sys.platform == "win32":
         base = os.environ.get("APPDATA", os.path.expanduser("~"))
         newPath, oldPath = os.path.join(base, "SynthMusic"), os.path.join(base, "KenMusic")
@@ -71,6 +73,7 @@ DEFAULT_SETTINGS = {
     "pauseVideoInBackground": True,
     "autoCheckUpdates": True,
     "skippedVersion": "",
+    "streamOnly": False,
 }
 
 

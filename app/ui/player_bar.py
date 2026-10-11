@@ -101,6 +101,7 @@ class PlayerBar(QFrame):
     openNowPlaying = Signal()
     ambientModeChosen = Signal(str)
     effectsRequested = Signal()
+    togetherRequested = Signal()
     openLyrics = Signal()
     artistClicked = Signal()
 
@@ -215,6 +216,8 @@ class PlayerBar(QFrame):
         self.nowPlayingButton.setStyleSheet(
             "QToolButton { padding-right: 12px; } QToolButton::menu-button { border: none; width: 14px; }"
             f" QToolButton::menu-arrow {{ image: url({theme.arrowDownPath()}); width: 10px; height: 10px; }}")
+        self.togetherButton = _toolButton("people", "Ascolta insieme")
+        self.togetherButton.clicked.connect(self.togetherRequested)
         self.eqButton = _toolButton("eq", "Equalizzatore (E)")
         self.eqButton.clicked.connect(self.openEqualizer)
         self.queueButton = _toolButton("queue", "Coda (Q)")
@@ -233,13 +236,14 @@ class PlayerBar(QFrame):
         self.volumeSlider.setRange(0, 100)
         self.volumeSlider.setFixedWidth(92)
         self.volumeSlider.valueChanged.connect(self.player.setVolume)
-        for widget in (self.nowPlayingButton, self.ambientButton, self.speedButton, self.queueButton, self.eqButton, self.loopButton,
+        for widget in (self.togetherButton, self.nowPlayingButton, self.ambientButton, self.speedButton, self.queueButton, self.eqButton, self.loopButton,
                        self.moreButton, self.volumeButton, self.volumeSlider):
             rightLayout.addWidget(widget)
         rightWidget.setMinimumWidth(rightWidget.sizeHint().width())
         layout.addWidget(rightWidget, 3)
 
         player.songChanged.connect(self.onSongChanged)
+        player.loadingChanged.connect(self.onLoadingChanged)
         player.playingChanged.connect(self.onPlayingChanged)
         player.positionChanged.connect(self.onPosition)
         player.durationChanged.connect(self.onDuration)
@@ -254,6 +258,10 @@ class PlayerBar(QFrame):
         details = f"{effects['rate']:.2f}x" + ("" if effects["keepPitch"] else ", pitch libero") + \
             (f", reverb {int(effects['reverbWet'] * 100)}%" if effects["reverbWet"] > 0.005 else "")
         self.speedButton.setToolTip(f"Velocità ed effetti: {details}")
+
+    def setTogetherActive(self, active, peopleCount=0):
+        self.togetherButton.setIcon(theme.icon("people", theme.ACCENT if active else theme.SUBTEXT, 18))
+        self.togetherButton.setToolTip(f"Ascolta insieme: {peopleCount} nella stanza" if active else "Ascolta insieme")
 
     def _buildAmbientMenu(self):
         menu = QMenu(self)
@@ -334,9 +342,16 @@ class PlayerBar(QFrame):
             return
         self.titleLabel.setText(song.get("title") or "")
         self.titleLabel.setToolTip(song.get("title") or "")
-        self.artistLabel.setText(song.get("artist") or "Artista sconosciuto")
+        self.artistLabel.setText("Caricamento in streaming..." if self.player.loading else (song.get("artist") or "Artista sconosciuto"))
         self.coverLabel.setPixmap(theme.coverPixmap(song.get("cover"), 56, song.get("id") or 0, 4))
         self.setFavorite(bool(song.get("favorite")))
+
+    def onLoadingChanged(self, loading):
+        song = self.player.currentSong()
+        if loading:
+            self.artistLabel.setText("Caricamento in streaming...")
+        elif song:
+            self.artistLabel.setText(song.get("artist") or "Artista sconosciuto")
 
     def setFavorite(self, isFavorite):
         self.favoriteButton.setIcon(theme.icon("heartFill" if isFavorite else "heart", theme.ACCENT if isFavorite else theme.SUBTEXT, 16))

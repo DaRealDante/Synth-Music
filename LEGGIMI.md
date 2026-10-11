@@ -1,4 +1,4 @@
-# Synth Music v1.1.0
+# Synth Music v1.7.0
 
 ## Installare / aggiornare (tu)
 Doppio click su **`INSTALLA_E_AGGIORNA.bat`**. Fa tutto da solo:
@@ -34,6 +34,39 @@ Mandagli solo **`installer\SynthMusic_Setup_vX.exe`**.
 - Windows potrebbe dire "PC protetto": *Ulteriori informazioni → Esegui comunque* (l'app non è firmata)
 
 Il motore YouTube (yt-dlp) si aggiorna da solo una volta al giorno: non serve ricompilare quando YouTube cambia.
+
+## Ascolta insieme (come funziona il "connetti")
+1. Bottone **persone** in basso a destra → **Crea una stanza**: il link (`synthmusic://join/SYNTH-XXXX-XXXX`) viene copiato da solo
+2. Mandalo agli amici (anche più persone). Loro: bottone persone → incollano link o codice → **Entra**
+3. Fatto: sentite la stessa canzone nello stesso punto. Tutti possono mettere play/pausa, saltare, cercare un punto, cambiare canzone, aggiungere alla coda e cambiare velocità/reverb (valgono per tutti, non toccano i tuoi effetti salvati)
+
+- Le app non si mandano l'audio: si scambiano solo "quale canzone, a che secondo, play/pausa" (criptato col codice). Ognuno la suona dal suo PC: se ce l'ha già usa il file, sennò la prende in **streaming** da YouTube
+- Il collegamento passa da server pubblici gratuiti (HiveMQ, EMQX, Mosquitto): niente router, niente account. Se uno è giù passa da solo al successivo
+- Restate allineati entro ~½ secondo; se uno resta indietro (internet lento) si riallinea da solo
+- Profilo (nome + foto): bottone persone → *Modifica profilo* (o Impostazioni → Profilo). La prima volta hai un nome casuale
+- Le canzoni messe dagli amici non finiscono nella tua libreria: se una ti piace, menu della canzone → *Salva nella libreria*
+
+## Playlist condivise
+- Tasto destro su una playlist → **Condividi playlist...**: il link è copiato. Chi lo apre (o lo incolla col bottone 🔗 accanto a "Playlist", o nel bottone persone) riceve la playlist
+- Aggiunte, rimozioni, ordine, nome e copertina si sincronizzano per tutti, anche se uno era offline (si allinea quando riapre l'app)
+- I brani che non hai diventano canzoni in streaming: menu → *Scarica sul PC* per averli offline
+- *Smetti di condividere* / *Elimina* toccano solo la tua copia
+
+## Streaming
+- Di default si scarica come sempre. Nella ricerca, bottone **+** → *Riproduci in streaming*, *Aggiungi alla coda*, *Salva in libreria (solo streaming)*
+- Impostazioni → **"Non scaricare: aggiungi le canzoni solo in streaming"**: il bottone Scarica diventa *Aggiungi* (vale anche per playlist YouTube e Spotify)
+- Le canzoni in streaming hanno "Streaming ·" sotto il titolo. Menu → *Scarica sul PC*; al contrario, su una canzone scaricata *Solo streaming (elimina il file)*
+- Taglia audio ed "Esporta con effetti" richiedono il file: scarica prima la canzone
+
+## Novità 1.7
+- **Ascolta insieme** con più persone, profili con nome e foto
+- **Playlist condivise** sincronizzate
+- **Streaming** senza download
+- Aprire un link `synthmusic://` porta direttamente nella stanza/playlist (se l'app è già aperta usa quella)
+
+## Novità 1.6.2
+- **Tasti multimediali** (Fn+F9, play/pausa, avanti/indietro) funzionano con Synth Music anche se l'app è in background
+- Synth Music compare nel riquadro media di Windows (volume / schermata di blocco) con titolo, artista e copertina
 
 ## Novità 1.6.1
 - I video ora vanno in **loop** se sono più corti della canzone (prima si fermavano)

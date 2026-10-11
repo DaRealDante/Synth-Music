@@ -1,6 +1,7 @@
 import os
 import sys
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
@@ -15,6 +16,8 @@ from app.updater import activateDownloadedEngine
 
 activateDownloadedEngine()
 
+from app.session_link import parseCode
+from app.single_instance import InstanceServer, sendToRunning
 from app.ui import theme
 from app.ui.main_window import MainWindow
 
@@ -39,8 +42,16 @@ def main():
     application.setStyle("Fusion")
     application.setStyleSheet(theme.STYLESHEET)
     application.setFont(QFont("Segoe UI", 10))
+    linkArgument = next((argument for argument in sys.argv[1:] if parseCode(argument)), None)
+    if sendToRunning(linkArgument or "show"):
+        sys.exit(0)
+    instanceServer = InstanceServer(parent=application)
+    instanceServer.listen()
     window = MainWindow()
     window.show()
+    instanceServer.messageReceived.connect(lambda message: window.handleExternalMessage(message))
+    if linkArgument:
+        QTimer.singleShot(1200, lambda: window.handleCode(linkArgument))
     sys.exit(application.exec())
 
 

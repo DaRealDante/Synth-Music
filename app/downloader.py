@@ -1,6 +1,8 @@
 import glob
 import os
 import re
+import threading
+import time
 import urllib.request
 
 from PySide6.QtCore import QObject, QThreadPool, Signal
@@ -62,6 +64,80 @@ def searchYoutube(query, maxResults=25):
         info = youtube.extract_info(f"ytsearch{maxResults}:{query}", download=False)
         entries = [_normalizeEntry(entry) for entry in (info.get("entries") or []) if entry and entry.get("id")]
         return {"playlistTitle": None, "entries": entries}
+
+
+STREAM_CACHE_SECONDS = 4 * 3600
+_streamCache = {}
+_streamCacheLock = threading.Lock()
+
+
+def resolveStream(target, useCache=True):
+    """Direct audio URL for a YouTube link or a `ytsearch1:` query, without downloading."""
+    import yt_dlp
+    target = target.strip()
+    if useCache:
+        with _streamCacheLock:
+            cached = _streamCache.get(target)
+        if cached and time.time() - cached[0] < STREAM_CACHE_SECONDS:
+            return dict(cached[1])
+    options = _baseOptions()
+    options.update({"format": "bestaudio[ext=m4a]/bestaudio/best", "noplaylist": True})
+    with yt_dlp.YoutubeDL(options) as youtube:
+        info = youtube.extract_info(target, download=False)
+    if info.get("entries") is not None:
+        entries = [entry for entry in (info.get("entries") or []) if entry]
+        if not entries:
+            raise RuntimeError("Nessun risultato su YouTube")
+        info = entries[0]
+    streamUrl = info.get("url")
+    headers = info.get("http_headers") or {}
+    if not streamUrl and info.get("requested_formats"):
+        streamUrl = info["requested_formats"][0].get("url")
+        headers = info["requested_formats"][0].get("http_headers") or headers
+    if not streamUrl:
+        raise RuntimeError("Stream non trovato")
+    result = {
+        "url": streamUrl,
+        "headers": dict(headers),
+        "duration": float(info.get("duration") or 0),
+        "title": info.get("title") or "",
+        "webpageUrl": info.get("webpage_url") or (target if isUrl(target) else ""),
+    }
+    with _streamCacheLock:
+        _streamCache[target] = (time.time(), dict(result))
+    return result
+
+
+def forgetStream(target):
+    with _streamCacheLock:
+        _streamCache.pop((target or "").strip(), None)
+
+
+def streamSongInfo(entry):
+    """Library data for a YouTube result that will only be streamed: same title/artist/cover logic as a download."""
+    artistName, songTitle = _splitArtistTitle(entry.get("title") or "Senza titolo", entry.get("channel") or "")
+    coverPath = None
+    videoId = entry.get("id")
+    candidateUrls = []
+    if videoId and re.fullmatch(r"[\w-]{11}", str(videoId)):
+        candidateUrls.append(f"https://i.ytimg.com/vi/{videoId}/maxresdefault.jpg")
+    candidateUrls.append(entry.get("thumbnail"))
+    for candidateUrl in candidateUrls:
+        if not candidateUrl:
+            continue
+        try:
+            coverPath = metadata.saveCoverBytes(_squareCover(fetchBytes(candidateUrl)))
+            break
+        except Exception:
+            continue
+    return {
+        "url": entry.get("url"),
+        "title": songTitle,
+        "artist": artistName,
+        "album": "",
+        "duration": float(entry.get("duration") or 0),
+        "cover": coverPath,
+    }
 
 
 def fetchBytes(url, timeout=15):
@@ -196,6 +272,7 @@ def downloadAudio(entry, musicDir, quality="192", progressCallback=None):
         "cover": coverPath,
         "url": info.get("webpage_url") or entry.get("url"),
         "playlistIndex": (spotifyInfo or {}).get("playlistIndex"),
+        "replaceSongId": entry.get("replaceSongId"),
     }
 
 

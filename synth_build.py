@@ -177,7 +177,9 @@ def build(root=None):
          "--add-data", "assets;assets",
          "--add-binary", r"build_bin\deno.exe;bin", "--add-binary", r"build_bin\ffmpeg.exe;bin",
          "--collect-submodules", "yt_dlp", "--collect-all", "yt_dlp_ejs", "--collect-all", "sounddevice",
-         "--collect-submodules", "spotify_scraper", "--hidden-import", "scipy.signal",
+         "--collect-submodules", "spotify_scraper", "--hidden-import", "scipy.signal", "--collect-submodules", "paho",
+         "--collect-all", "winrt", "--hidden-import", "winrt.windows.media", "--hidden-import", "winrt.windows.media.playback",
+         "--hidden-import", "winrt.windows.storage", "--hidden-import", "winrt.windows.storage.streams", "--hidden-import", "winrt.windows.foundation",
          "--exclude-module", "imageio_ffmpeg", "--exclude-module", "tkinter", "main.py"])
 
     say("[4/4] Creo l'installer da condividere...")

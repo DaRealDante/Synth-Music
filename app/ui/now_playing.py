@@ -167,6 +167,9 @@ class NowPlayingPanel(QFrame):
         self.waveform.setSelection(None, None)
         self.refreshLoops()
         path = song["path"]
+        if str(path).startswith("stream:"):
+            self.waveform.setMessage("Canzone in streaming: scaricala per vedere la forma d'onda")
+            return
         cached = _waveformCache.get(path)
         if cached:
             self._applyWaveform(path, cached)

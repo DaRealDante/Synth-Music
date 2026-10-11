@@ -139,11 +139,16 @@ def applyReverbOffline(samples, wet, decaySeconds):
     return (mixed / max(1.0, peak / 0.98)).astype(numpy.float32)
 
 
+def isRemote(path):
+    return bool(path) and str(path).lower().startswith(("http://", "https://"))
+
+
 class _Decoder(threading.Thread):
-    def __init__(self, engine, path, rate, generation, estimatedSeconds, keepPitch=True):
+    def __init__(self, engine, path, rate, generation, estimatedSeconds, keepPitch=True, headers=None):
         super().__init__(daemon=True)
         self.engine = engine
         self.path = path
+        self.headers = headers or {}
         self.rate = rate
         self.keepPitch = keepPitch
         self.generation = generation
@@ -153,8 +158,12 @@ class _Decoder(threading.Thread):
 
     def run(self):
         executable = ffmpegExe()
-        command = [executable, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", self.path, "-vn",
-                   "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE)]
+        command = [executable, "-nostdin", "-hide_banner", "-loglevel", "error"]
+        if isRemote(self.path):
+            command += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
+            if self.headers:
+                command += ["-headers", "".join(f"{key}: {value}\r\n" for key, value in self.headers.items())]
+        command += ["-i", self.path, "-vn", "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE)]
         audioFilter = speedFilter(self.rate, self.keepPitch)
         if audioFilter:
             command += ["-af", audioFilter]
@@ -221,6 +230,8 @@ class AudioEngine(QObject):
         self.lock = threading.RLock()
         self._source = QUrl()
         self._path = None
+        self.sourceHeaders = {}
+        self.durationHintMs = 0
         self._state = QMediaPlayer.StoppedState
         self._status = QMediaPlayer.NoMedia
         self._rate = 1.0
@@ -289,7 +300,7 @@ class AudioEngine(QObject):
             self._setState(QMediaPlayer.StoppedState)
             self._setStatus(QMediaPlayer.NoMedia)
             return
-        self._path = self._source.toLocalFile()
+        self._path = self._source.toLocalFile() if self._source.isLocalFile() else self._source.toString()
         self._startDecoder(self._path, 0)
         self._setStatus(QMediaPlayer.LoadingMedia)
         if wasPlaying:
@@ -297,14 +308,18 @@ class AudioEngine(QObject):
 
     def _startDecoder(self, path, startMs):
         estimatedSeconds = 0
-        try:
-            from .metadata import readTags
-            estimatedSeconds = readTags(path)["duration"]
-        except Exception:
-            pass
+        if isRemote(path):
+            estimatedSeconds = (self.durationHintMs or 0) / 1000
+        else:
+            try:
+                from .metadata import readTags
+                estimatedSeconds = readTags(path)["duration"]
+            except Exception:
+                pass
         if estimatedSeconds:
             self._setDuration(int(estimatedSeconds * 1000))
-        self.decoder = _Decoder(self, path, self._rate, self.generation, estimatedSeconds or 300, self._keepPitch)
+        self.decoder = _Decoder(self, path, self._rate, self.generation, estimatedSeconds or 300, self._keepPitch,
+                                self.sourceHeaders if isRemote(path) else None)
         if startMs:
             self.pendingSeekMs = startMs
         self.decoder.start()

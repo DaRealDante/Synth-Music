@@ -174,8 +174,8 @@ class TitleDelegate(QStyledItemDelegate):
         painter.setFont(artistFont)
         painter.setPen(QPen(QColor(theme.SUBTEXT)))
         artistText = song.get("artist") or "Artista sconosciuto"
-        if song.get("source") == "youtube":
-            artistText = artistText
+        if str(song.get("path") or "").startswith("stream:"):
+            artistText = "Streaming · " + artistText
         artistText = QFontMetrics(artistFont).elidedText(artistText, Qt.ElideRight, textWidth)
         painter.drawText(QRect(textLeft, rect.top() + rect.height() // 2 + 1, textWidth, rect.height() // 2 - 8), Qt.AlignLeft | Qt.AlignTop, artistText)
 

@@ -13,10 +13,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import audio_tools, lyrics, metadata
+from .. import audio_tools, downloader, lyrics, metadata
 from ..config import APP_NAME, AUDIO_EXTENSIONS, TEMP_DIR, VERSION, resourceDir, settings
-from ..database import Database
+from ..database import STREAM_PREFIX, Database, isStreamPath
 from ..downloader import DownloadManager
+from ..media_keys import MediaSession
+from ..session_link import parseCode
+from ..playlist_sync import SharedPlaylists
+from ..session_link import linkFor
+from ..together import TogetherController
 from ..player import Player
 from ..workers import runInBackground
 from . import theme
@@ -152,6 +157,27 @@ class MainWindow(QMainWindow):
         rootLayout.setContentsMargins(8, 8, 8, 0)
         rootLayout.setSpacing(8)
 
+        self.togetherBanner = QFrame()
+        self.togetherBanner.setObjectName("togetherBanner")
+        self.togetherBanner.setStyleSheet("QFrame#togetherBanner { background: #10391F; border-radius: 8px; }")
+        bannerLayout = QHBoxLayout(self.togetherBanner)
+        bannerLayout.setContentsMargins(12, 6, 8, 6)
+        bannerLayout.setSpacing(8)
+        self.togetherAvatars = QHBoxLayout()
+        self.togetherAvatars.setSpacing(4)
+        bannerLayout.addLayout(self.togetherAvatars)
+        self.togetherLabel = QLabel("")
+        self.togetherLabel.setStyleSheet("font-weight: 600;")
+        bannerLayout.addWidget(self.togetherLabel, 1)
+        manageButton = QPushButton("Gestisci")
+        manageButton.clicked.connect(self.showTogether)
+        leaveButton = QPushButton("Esci")
+        leaveButton.clicked.connect(lambda: self.together.leaveRoom())
+        bannerLayout.addWidget(manageButton)
+        bannerLayout.addWidget(leaveButton)
+        self.togetherBanner.hide()
+        rootLayout.addWidget(self.togetherBanner)
+
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setHandleWidth(8)
         self.splitter.setChildrenCollapsible(False)
@@ -198,7 +224,16 @@ class MainWindow(QMainWindow):
         self.effectsPopup.effectsChanged.connect(self._onEffectsChanged)
         self.effectsPopup.exportRequested.connect(self.exportWithEffects)
         self.playerBar.effectsRequested.connect(self.showEffects)
-        self.player.effectsProvider = self.songEffects
+        self.together = TogetherController(self.player, self.database, self.songEffects,
+                                           lambda text: self.showStatus(text, 3500), parent=self)
+        self.together.effectsChanged.connect(self.playerBar.setEffectsIndicator)
+        self.together.roomChanged.connect(self._updateTogetherUi)
+        self.together.peersChanged.connect(self._updateTogetherUi)
+        self.togetherPopup = None
+        self.sharedPlaylists = SharedPlaylists(self.database, lambda text: self.showStatus(text, 4000), self)
+        self.sharedPlaylists.playlistsChanged.connect(self._onSharedPlaylistChanged)
+        self.playerBar.togetherRequested.connect(self.showTogether)
+        self.player.effectsProvider = self.effectsForSong
         self.player.effectsApplied.connect(self.playerBar.setEffectsIndicator)
         self.playerBar.openLyrics.connect(self.toggleLyricsView)
         self.playerBar.lyricsMenu.aboutToShow.connect(self._fillLyricsMenu)
@@ -234,6 +269,7 @@ class MainWindow(QMainWindow):
         self.refreshPlaylists()
         self.navigate("home")
         self._registerMediaKeys()
+        QTimer.singleShot(1500, self.sharedPlaylists.start)
         QTimer.singleShot(8000, self.checkEngineUpdate)
         QTimer.singleShot(12000, lambda: self.checkAppUpdate(manual=False))
         moreMenu = self.playerBar.moreButton.menu()
@@ -299,8 +335,13 @@ class MainWindow(QMainWindow):
         addPlaylistButton.setIcon(theme.icon("add", theme.SUBTEXT, 16))
         addPlaylistButton.setToolTip("Crea playlist (Ctrl+N)")
         addPlaylistButton.clicked.connect(self.createPlaylist)
+        addSharedButton = QToolButton()
+        addSharedButton.setIcon(theme.icon("link", theme.SUBTEXT, 16))
+        addSharedButton.setToolTip("Aggiungi una playlist condivisa (codice o link)")
+        addSharedButton.clicked.connect(self.askSharedPlaylist)
         playlistHeader.addWidget(playlistLabel)
         playlistHeader.addStretch()
+        playlistHeader.addWidget(addSharedButton)
         playlistHeader.addWidget(addPlaylistButton)
         libraryLayout.addLayout(playlistHeader)
         self.playlistList = PlaylistList(self)
@@ -395,7 +436,8 @@ class MainWindow(QMainWindow):
         selectedId = self.playlistPage.playlistId if self.pages.currentWidget() is self.playlistPage else None
         self.playlistList.clear()
         for playlist in self.database.playlists():
-            item = QListWidgetItem(QIcon(self.playlistCover(playlist, 46, 4)), f"{playlist['name']}\nPlaylist · {playlist['songCount']} brani")
+            kind = "Playlist condivisa" if self.sharedPlaylists.isShared(playlist["id"]) else "Playlist"
+            item = QListWidgetItem(QIcon(self.playlistCover(playlist, 46, 4)), f"{playlist['name']}\n{kind} · {playlist['songCount']} brani")
             item.setData(Qt.UserRole, playlist["id"])
             item.setSizeHint(QSize(100, 56))
             self.playlistList.addItem(item)
@@ -435,9 +477,11 @@ class MainWindow(QMainWindow):
         playlist = self.database.getPlaylist(playlistId)
         if not playlist:
             return
-        answer = QMessageBox.question(self, APP_NAME, f"Eliminare la playlist \"{playlist['name']}\"?\nI brani resteranno nella libreria.")
+        sharedNote = "\nÈ condivisa: verrà eliminata solo da te." if self.sharedPlaylists.isShared(playlistId) else ""
+        answer = QMessageBox.question(self, APP_NAME, f"Eliminare la playlist \"{playlist['name']}\"?\nI brani resteranno nella libreria.{sharedNote}")
         if answer != QMessageBox.Yes:
             return
+        self.sharedPlaylists.stopSharing(playlistId)
         self.database.deletePlaylist(playlistId)
         self.refreshPlaylists()
         if self.pages.currentWidget() is self.playlistPage and self.playlistPage.playlistId == playlistId:
@@ -460,6 +504,8 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.Yes:
                 return
             newIds = songIds
+        for songId in set(newIds):
+            self.database.updateSong(songId, hidden=0)
         self.database.addToPlaylist(playlistId, newIds)
         playlist = self.database.getPlaylist(playlistId)
         self.refreshPlaylists()
@@ -486,6 +532,11 @@ class MainWindow(QMainWindow):
         menu.addAction(theme.icon("queue"), "Aggiungi alla coda", lambda: self.player.addToQueue(self.database.playlistSongs(playlistId)))
         menu.addSeparator()
         menu.addAction(theme.icon("edit"), "Modifica dettagli", lambda: self.editPlaylist(playlistId))
+        if self.sharedPlaylists.isShared(playlistId):
+            menu.addAction(theme.icon("link"), "Copia link di condivisione", lambda: self._copySharedLink(playlistId))
+            menu.addAction(theme.icon("close"), "Smetti di condividere", lambda: self.stopSharingPlaylist(playlistId))
+        else:
+            menu.addAction(theme.icon("share"), "Condividi playlist...", lambda: self.sharePlaylist(playlistId))
         menu.addAction(theme.icon("delete"), "Elimina", lambda: self.deletePlaylist(playlistId))
         menu.exec(self.playlistList.viewport().mapToGlobal(position))
 
@@ -498,6 +549,8 @@ class MainWindow(QMainWindow):
 
     def toggleFavorite(self, song):
         isFavorite = self.database.toggleFavorite(song["id"])
+        if isFavorite and song.get("hidden"):
+            self.database.updateSong(song["id"], hidden=0)
         updated = self.database.getSong(song["id"])
         self.broadcastSong(updated)
         if self.pages.currentWidget() is self.favoritesPage:
@@ -533,11 +586,21 @@ class MainWindow(QMainWindow):
                        "Rimuovi dai preferiti" if allFavorite else "Salva nei preferiti",
                        lambda: self._setFavorites(songs, not allFavorite))
         menu.addSeparator()
+        streamSongs = [song for song in songs if isStreamPath(song.get("path"))]
+        hiddenSongs = [song for song in songs if song.get("hidden")]
+        if hiddenSongs:
+            menu.addAction(theme.icon("add"), "Salva nella libreria", lambda: self.unhideSongs(hiddenSongs))
+        if streamSongs:
+            menu.addAction(theme.icon("download"), "Scarica sul PC", lambda: self.downloadStreamSongs(streamSongs))
         if single:
             menu.addAction(theme.icon("loop"), "Loop A-B...", lambda: self._openLoopFor(single))
-            menu.addAction(theme.icon("cut"), "Taglia audio...", lambda: self.openCutDialog(single))
+            if not streamSongs:
+                menu.addAction(theme.icon("cut"), "Taglia audio...", lambda: self.openCutDialog(single))
             menu.addAction(theme.icon("edit"), "Modifica informazioni...", lambda: self.editSong(single))
-            menu.addAction(theme.icon("folder"), "Mostra nella cartella", lambda: showInFolder(single["path"]))
+            if not streamSongs:
+                menu.addAction(theme.icon("folder"), "Mostra nella cartella", lambda: showInFolder(single["path"]))
+                if single.get("url"):
+                    menu.addAction(theme.icon("cloud"), "Solo streaming (elimina il file)", lambda: self.makeStreamOnly(single))
             if single.get("url"):
                 menu.addAction(theme.icon("globe"), "Apri su YouTube", lambda: QDesktopServices.openUrl(QUrl(single["url"])))
             menu.addSeparator()
@@ -549,7 +612,7 @@ class MainWindow(QMainWindow):
 
     def _setFavorites(self, songs, favorite):
         for song in songs:
-            self.database.updateSong(song["id"], favorite=1 if favorite else 0)
+            self.database.updateSong(song["id"], favorite=1 if favorite else 0, **({"hidden": 0} if favorite else {}))
             self.broadcastSong(self.database.getSong(song["id"]))
         if self.pages.currentWidget() is self.favoritesPage:
             self.favoritesPage.refresh()
@@ -567,7 +630,7 @@ class MainWindow(QMainWindow):
             return
         values = dialog.values()
         self.database.updateSong(song["id"], **values)
-        if dialog.writeTagsCheck.isChecked():
+        if dialog.writeTagsCheck.isChecked() and not isStreamPath(song.get("path")):
             isCurrent = self.player.currentSong() and self.player.currentSong().get("id") == song["id"]
             if not metadata.writeMp3Tags(song["path"], values["title"], values["artist"], values["album"], values["cover"]):
                 self.showStatus("Dati salvati nell'app (il file è in uso o non scrivibile)" if isCurrent else "Impossibile scrivere nel file")
@@ -596,6 +659,8 @@ class MainWindow(QMainWindow):
         if deleteFilesCheck.isChecked():
             self.videoController.unload()
             for song in songs:
+                if isStreamPath(song.get("path")):
+                    continue
                 try:
                     os.remove(song["path"])
                 except OSError:
@@ -613,6 +678,8 @@ class MainWindow(QMainWindow):
     def openCutDialog(self, song, initialSelection=None):
         if not song:
             self.showStatus("Nessuna canzone selezionata")
+            return
+        if not self.requireFile(song):
             return
         if not os.path.isfile(song["path"]):
             self.showStatus("File non trovato")
@@ -717,8 +784,23 @@ class MainWindow(QMainWindow):
         self.showStatus(f"Importati {len(results)} brani" if results else "Nessun file audio trovato")
 
     def _onSongDownloaded(self, result, playlistId):
-        songId = self.database.addSong(result["path"], result["title"], result["artist"], result["album"],
-                                       result["duration"], result["cover"], "youtube", result["url"])
+        streamSong = self.database.getSong(result["replaceSongId"]) if result.get("replaceSongId") else None
+        if streamSong is None or not isStreamPath(streamSong.get("path")):
+            streamSong = self.database.songByPath(STREAM_PREFIX + result["url"]) if result.get("url") else None
+        if streamSong is not None:
+            songId = streamSong["id"]
+            duplicate = self.database.songByPath(result["path"])
+            if duplicate and duplicate["id"] != songId:
+                self.database.mergeSongInto(duplicate["id"], songId)
+            metadataFields = {"title": result["title"], "artist": result["artist"], "album": result["album"]} \
+                if streamSong.get("hidden") else {}
+            self.database.updateSong(songId, path=result["path"], source="youtube", url=result["url"] or streamSong.get("url"),
+                                     duration=result["duration"] or streamSong.get("duration") or 0,
+                                     cover=streamSong.get("cover") or result["cover"], hidden=0, **metadataFields)
+            self.broadcastSong(self.database.getSong(songId))
+        else:
+            songId = self.database.addSong(result["path"], result["title"], result["artist"], result["album"],
+                                           result["duration"], result["cover"], "youtube", result["url"])
         if result.get("videoPath"):
             self.database.updateSong(songId, videoPath=result["videoPath"], videoUrl=result.get("videoUrl"), videoChecked=1)
         if settings.get("autoLyrics"):
@@ -735,6 +817,193 @@ class MainWindow(QMainWindow):
             self.refreshCurrentPage()
         self.showStatus(f"Scaricato: {result['title']}")
 
+    # ---------- playlist condivise ----------
+    def sharePlaylist(self, playlistId):
+        playlist = self.database.getPlaylist(playlistId)
+        if not playlist:
+            return
+        code = self.sharedPlaylists.share(playlistId)
+        QApplication.clipboard().setText(linkFor(code))
+        self.refreshPlaylists()
+        QMessageBox.information(self, "Playlist condivisa",
+                                f"\"{playlist['name']}\" ora è condivisa.\n\nCodice: {code}\n\n"
+                                "Il link è già copiato: mandalo ai tuoi amici. Chi lo apre (o incolla il codice) "
+                                "riceve la playlist, e tutte le modifiche di tutti si sincronizzano da sole.")
+
+    def _copySharedLink(self, playlistId):
+        code = self.sharedPlaylists.codeOf(playlistId)
+        if code:
+            QApplication.clipboard().setText(linkFor(code))
+            self.showStatus(f"Link copiato ({code})")
+
+    def stopSharingPlaylist(self, playlistId):
+        answer = QMessageBox.question(self, APP_NAME, "Smettere di sincronizzare questa playlist?\n"
+                                                      "Resta da te così com'è; le modifiche degli altri non arriveranno più.")
+        if answer == QMessageBox.Yes:
+            self.sharedPlaylists.stopSharing(playlistId)
+            self.refreshPlaylists()
+
+    def askSharedPlaylist(self):
+        text, accepted = QInputDialog.getText(self, "Playlist condivisa", "Incolla il codice o il link della playlist:")
+        if accepted and text.strip():
+            self.handleCode(text)
+
+    def _onSharedPlaylistChanged(self, playlistId):
+        theme.clearCoverCache()
+        self.refreshPlaylists()
+        if self.pages.currentWidget() is self.playlistPage and self.playlistPage.playlistId == playlistId:
+            self.playlistPage.refresh()
+
+    # ---------- ascolta insieme ----------
+    def showTogether(self):
+        if self.togetherPopup is None:
+            from .together_popup import TogetherPopup
+            self.togetherPopup = TogetherPopup(self)
+        self.togetherPopup.showAbove(self.playerBar.togetherButton)
+
+    def handleCode(self, text):
+        """A room or shared-playlist code/link pasted anywhere (popup, link opened from the browser)."""
+        parsed = parseCode(text)
+        if not parsed:
+            self.showStatus("Codice non valido")
+            return False
+        kind, code = parsed
+        if self.togetherPopup is not None:
+            self.togetherPopup.hide()
+        if kind == "room":
+            if self.together.code == code:
+                self.showStatus("Sei già in questa stanza")
+                return True
+            self.together.joinRoom(code)
+            self.showStatus("Entro nella stanza...", 3000)
+        else:
+            self.sharedPlaylists.addShared(code)
+        return True
+
+    def handleExternalMessage(self, message):
+        self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if message != "show":
+            self.handleCode(message)
+
+    def _updateTogetherUi(self):
+        inRoom = self.together.inRoom()
+        others = self.together.otherPeers()
+        self.playerBar.setTogetherActive(inRoom, len(self.together.peers))
+        self.togetherBanner.setVisible(inRoom)
+        while self.togetherAvatars.count():
+            item = self.togetherAvatars.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if not inRoom:
+            return
+        from .together_popup import avatarPixmap
+        for peer in list(others.values())[:6]:
+            avatar = QLabel()
+            avatar.setFixedSize(24, 24)
+            avatar.setPixmap(avatarPixmap(peer.get("photo"), peer.get("name"), 24))
+            avatar.setToolTip(peer.get("name"))
+            self.togetherAvatars.addWidget(avatar)
+        names = [peer.get("name") for peer in others.values()]
+        if names:
+            shown = ", ".join(names[:3]) + (f" e altri {len(names) - 3}" if len(names) > 3 else "")
+            self.togetherLabel.setText(f"In ascolto insieme con {shown}")
+        else:
+            self.togetherLabel.setText(f"Stanza {self.together.code} · aspetto i tuoi amici (Gestisci → Copia link)")
+
+    # ---------- streaming ----------
+    def requireFile(self, song):
+        if song and isStreamPath(song.get("path")):
+            self.showStatus("Questa canzone è in streaming: scaricala prima (menu → Scarica sul PC)", 4000)
+            return False
+        return True
+
+    def addStreamEntries(self, entries, playlistId=None, play=False, queue=False):
+        """YouTube results added to the library without downloading the audio."""
+        entries = [entry for entry in entries if entry.get("url")]
+        if not entries:
+            return
+        self.showStatus("Aggiungo in streaming..." if len(entries) > 1 else "Carico in streaming...", 30000)
+
+        def collect():
+            return [downloader.streamSongInfo(entry) for entry in entries]
+
+        def onFinished(infos):
+            songIds = [self.database.addStreamSong(info["url"], info["title"], info["artist"], info["album"],
+                                                   info["duration"], info["cover"]) for info in infos]
+            if playlistId and self.database.getPlaylist(playlistId):
+                self.database.addToPlaylist(playlistId, songIds)
+                self.refreshPlaylists()
+                if self.pages.currentWidget() is self.playlistPage and self.playlistPage.playlistId == playlistId:
+                    self.playlistPage.refresh()
+            songs = self.database.getSongs(songIds)
+            if play:
+                self.playSongs(songs, 0)
+            elif queue:
+                self.player.addToQueue(songs)
+            if self.pages.currentWidget() is not self.searchPage:
+                self.refreshCurrentPage()
+            self.showStatus("In riproduzione (streaming)" if play else (
+                "Aggiunto alla coda (streaming)" if queue else f"Aggiunti {len(songs)} brani in streaming"))
+
+        runInBackground(collect, onFinished=onFinished,
+                        onError=lambda message: self.showStatus(f"Errore: {message[:120]}", 5000))
+
+    def downloadStreamSongs(self, songs):
+        started = 0
+        for song in songs:
+            if not isStreamPath(song.get("path")):
+                continue
+            if song.get("url"):
+                entry = {"url": song["url"], "title": song.get("title") or "", "channel": song.get("artist") or "",
+                         "duration": song.get("duration") or 0, "replaceSongId": song["id"]}
+            else:
+                entry = {"url": None, "title": song.get("title") or "", "channel": "", "duration": song.get("duration") or 0,
+                         "replaceSongId": song["id"],
+                         "spotify": {"title": song.get("title") or "", "artist": song.get("artist") or "",
+                                     "mainArtist": song.get("artist") or "", "album": song.get("album") or "",
+                                     "durationMs": int((song.get("duration") or 0) * 1000), "image": None,
+                                     "playlistIndex": None, "spotifyId": f"stream-{song['id']}"}}
+            self.downloads.enqueue(entry)
+            started += 1
+        if started:
+            self.showStatus(f"Download di {started} brani avviato")
+
+    def makeStreamOnly(self, song):
+        song = self.database.getSong(song["id"]) or song
+        if not song.get("url") or isStreamPath(song.get("path")):
+            return
+        answer = QMessageBox.question(self, APP_NAME, f"Eliminare il file di \"{song.get('title')}\" e ascoltarla solo in streaming?\n"
+                                                      "Playlist, loop, testo ed effetti restano. Servirà internet per ascoltarla.")
+        if answer != QMessageBox.Yes:
+            return
+        streamPath = STREAM_PREFIX + song["url"]
+        duplicate = self.database.songByPath(streamPath)
+        if duplicate and duplicate["id"] != song["id"]:
+            self.database.mergeSongInto(duplicate["id"], song["id"])
+        filePath = song["path"]
+        current = self.player.currentSong()
+        if current and current.get("id") == song["id"]:
+            self.player.pause()
+        self.database.updateSong(song["id"], path=streamPath, source="stream")
+        try:
+            os.remove(filePath)
+        except OSError:
+            pass
+        self.rightPanel.invalidate(filePath)
+        self.broadcastSong(self.database.getSong(song["id"]))
+        self.refreshCurrentPage()
+        self.showStatus("Ora è solo in streaming")
+
+    def unhideSongs(self, songs):
+        for song in songs:
+            self.database.updateSong(song["id"], hidden=0)
+            self.broadcastSong(self.database.getSong(song["id"]))
+        self.refreshCurrentPage()
+        self.showStatus("Salvato nella libreria")
+
     # ---------- speed / pitch / reverb (per song) ----------
     def songEffects(self, song):
         fresh = self.database.getSong(song["id"]) if song and song.get("id") else None
@@ -747,17 +1016,27 @@ class MainWindow(QMainWindow):
             "reverbSize": float(fresh.get("reverbSize") or 1.8),
         }
 
+    def effectsForSong(self, song):
+        return self.together.effectsFor(song) or self.songEffects(song)
+
     def showEffects(self):
         current = self.player.currentSong()
         if not current:
             self.showStatus("Avvia prima una canzone")
             return
-        self.effectsPopup.setSong(current, self.songEffects(current))
+        roomEffects = self.together.roomEffects if self.together.inRoom() else None
+        self.effectsPopup.setSong(current, dict(roomEffects) if roomEffects else self.songEffects(current))
         self.effectsPopup.showBelow(self.playerBar.speedButton)
 
     def _onEffectsChanged(self, effects):
         current = self.player.currentSong()
         if not current:
+            return
+        if self.together.inRoom():
+            self.together.setLocalEffects(effects)
+            self.player.setPlaybackRate(effects["rate"], effects["keepPitch"])
+            self.player.setReverb(effects["reverbWet"], effects["reverbSize"])
+            self.playerBar.setEffectsIndicator(effects)
             return
         self.database.updateSong(current["id"], songRate=effects["rate"], keepPitch=1 if effects["keepPitch"] else 0,
                                  reverbWet=effects["reverbWet"], reverbSize=effects["reverbSize"])
@@ -770,6 +1049,8 @@ class MainWindow(QMainWindow):
         if not current:
             return
         song = self.database.getSong(current["id"])
+        if not song or not self.requireFile(song):
+            return
         effects = self.songEffects(song)
         if abs(effects["rate"] - 1.0) < 0.005 and effects["reverbWet"] < 0.005:
             self.showStatus("Imposta prima una velocità o il reverb")
@@ -1156,7 +1437,10 @@ class MainWindow(QMainWindow):
                    for job in self.downloads.jobs)
 
     def _queueVideo(self, song, url):
-        baseName = os.path.splitext(os.path.basename(song["path"]))[0]
+        if isStreamPath(song.get("path")):
+            baseName = f"{song.get('artist')} - {song.get('title')}" if song.get("artist") else (song.get("title") or "video")
+        else:
+            baseName = os.path.splitext(os.path.basename(song["path"]))[0]
         self.downloads.enqueue({"kind": "video", "songId": song["id"], "url": url, "title": f"Video: {song.get('title')}",
                                 "baseName": baseName})
         self.showStatus("Download del video avviato")
@@ -1234,11 +1518,14 @@ class MainWindow(QMainWindow):
         self.refreshPlaylists()
 
     def downloadSpotifyTracks(self, tracks, playlistId):
+        if settings.get("streamOnly"):
+            self.addSpotifyAsStream(tracks, playlistId)
+            return
         if playlistId:
             self.pendingOrder.setdefault(playlistId, {})
         reused, queued = 0, 0
         for trackInfo in tracks:
-            existing = self.database.findSong(trackInfo["title"], trackInfo["mainArtist"])
+            existing = self.database.findSong(trackInfo["title"], trackInfo["mainArtist"], fileOnly=True)
             if existing:
                 reused += 1
                 if playlistId:
@@ -1260,6 +1547,39 @@ class MainWindow(QMainWindow):
         if reused and queued:
             message += f" ({reused} già in libreria)"
         self.showStatus(message, 4000)
+
+    def addSpotifyAsStream(self, tracks, playlistId):
+        """Spotify tracks added as streaming songs: YouTube is searched only when a song is played."""
+        def collect():
+            infos = []
+            for trackInfo in tracks:
+                coverPath = None
+                if trackInfo.get("image"):
+                    try:
+                        coverPath = metadata.saveCoverBytes(downloader.fetchBytes(trackInfo["image"]))
+                    except Exception:
+                        coverPath = None
+                infos.append((trackInfo, coverPath))
+            return infos
+
+        def onFinished(infos):
+            songIds = []
+            for trackInfo, coverPath in infos:
+                existing = self.database.findSong(trackInfo["title"], trackInfo["mainArtist"])
+                if existing:
+                    songIds.append(existing["id"])
+                    continue
+                query = f"{trackInfo['mainArtist']} - {trackInfo['title']}".strip(" -")
+                songIds.append(self.database.addStreamSong(f"ytsearch1:{query} audio", trackInfo["title"], trackInfo["artist"],
+                                                           trackInfo.get("album") or "", trackInfo["durationMs"] / 1000, coverPath))
+            if playlistId and self.database.getPlaylist(playlistId):
+                self.database.addToPlaylist(playlistId, songIds)
+                self.refreshPlaylists()
+            self.refreshCurrentPage()
+            self.showStatus(f"Aggiunti {len(songIds)} brani in streaming", 4000)
+
+        self.showStatus("Aggiungo i brani in streaming...", 60000)
+        runInBackground(collect, onFinished=onFinished, onError=lambda message: self.showStatus(f"Errore: {message[:120]}", 5000))
 
     def _applyPendingOrder(self, playlistId):
         order = self.pendingOrder.get(playlistId, {})
@@ -1307,12 +1627,25 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{song.get('title')} · {song.get('artist') or 'Artista sconosciuto'}" if song else APP_NAME)
         if hasattr(self, "tray"):
             self.tray.setToolTip(f"{APP_NAME}\n{song.get('title')}" if song else APP_NAME)
+        self._updateMediaSession(song)
+
+    def _updateMediaSession(self, song):
+        mediaSession = getattr(self, "mediaSession", None)
+        if mediaSession is None or not mediaSession.available:
+            return
+        if song:
+            mediaSession.setSong(song.get("title"), song.get("artist"), song.get("album"), song.get("cover"))
+            mediaSession.setPlaying(self.player.isPlaying())
+        else:
+            mediaSession.setStopped()
 
     def _onPlayingChanged(self, isPlaying):
         current = self.player.currentSong()
         self.pages.currentWidget().setCurrent(current.get("id") if current else None, isPlaying)
         if hasattr(self, "trayPlayAction"):
             self.trayPlayAction.setText("Pausa" if isPlaying else "Riproduci")
+        if getattr(self, "mediaSession", None) is not None:
+            self.mediaSession.setPlaying(isPlaying)
 
     def _setupShortcuts(self):
         def bind(sequence, function):
@@ -1376,6 +1709,16 @@ class MainWindow(QMainWindow):
     def _registerMediaKeys(self):
         self.mediaHotkeys = {}
         if sys.platform != "win32":
+            return
+        self.mediaSession = MediaSession(self)
+        self.mediaSession.playPausePressed.connect(self.player.togglePlay)
+        self.mediaSession.playPressed.connect(self.player.play)
+        self.mediaSession.pausePressed.connect(self.player.pause)
+        self.mediaSession.stopPressed.connect(self.player.pause)
+        self.mediaSession.nextPressed.connect(lambda: self.player.next())
+        self.mediaSession.previousPressed.connect(self.player.previous)
+        if self.mediaSession.start():
+            self._updateMediaSession(self.player.currentSong())
             return
         try:
             import ctypes
@@ -1444,6 +1787,10 @@ class MainWindow(QMainWindow):
         settings.save()
         if hasattr(self, "tray"):
             self.tray.hide()
+        self.together.leaveRoom()
+        self.sharedPlaylists.stopAll()
+        if getattr(self, "mediaSession", None) is not None:
+            self.mediaSession.shutdown()
         if sys.platform == "win32" and self.mediaHotkeys:
             try:
                 import ctypes
