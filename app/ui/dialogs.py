@@ -464,131 +464,6 @@ class CutDialog(QDialog):
         super().done(result)
 
 
-def storeBackground(sourcePath):
-    """Copies a background image/GIF into the app data folder (so it keeps working if the original moves)."""
-    import hashlib
-    import shutil
-    from ..config import BACKGROUNDS_DIR
-    if not sourcePath or not os.path.isfile(sourcePath):
-        return None
-    from PySide6.QtGui import QImageReader
-    if not QImageReader(sourcePath).canRead():
-        return None
-    digest = hashlib.sha1()
-    with open(sourcePath, "rb") as imageFile:
-        for chunk in iter(lambda: imageFile.read(1 << 20), b""):
-            digest.update(chunk)
-    extension = os.path.splitext(sourcePath)[1].lower() or ".png"
-    targetPath = os.path.join(BACKGROUNDS_DIR, digest.hexdigest()[:16] + extension)
-    if not os.path.isfile(targetPath):
-        os.makedirs(BACKGROUNDS_DIR, exist_ok=True)
-        shutil.copyfile(sourcePath, targetPath)
-    return targetPath
-
-
-def _sectionTitle(text):
-    label = QLabel(text)
-    label.setObjectName("h3")
-    return label
-
-
-class ThemePreview(QWidget):
-    """Mini version of the window: background, see-through panels and accent, so you see the theme before saving."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(150)
-        self.palette_ = theme.resolveColors({})
-        self.background = theme.normalizeBackground({})
-        self.image = None
-        self.movie = None
-
-    def setTheme(self, colors, background):
-        from PySide6.QtGui import QImage, QImageReader, QMovie
-        self.palette_ = theme.resolveColors(colors)
-        oldPath = self.background.get("path") if self.background.get("type") == "image" else None
-        self.background = theme.normalizeBackground(background)
-        newPath = self.background["path"] if self.background["type"] == "image" else None
-        if newPath != oldPath:
-            if self.movie is not None:
-                self.movie.stop()
-                self.movie.deleteLater()
-                self.movie = None
-            self.image = None
-            if newPath and os.path.isfile(newPath):
-                reader = QImageReader(newPath)
-                if reader.supportsAnimation() and reader.imageCount() != 1:
-                    self.movie = QMovie(newPath, parent=self)
-                    self.movie.frameChanged.connect(lambda frame: self.update())
-                    self.movie.start()
-                else:
-                    image = QImage(newPath)
-                    self.image = None if image.isNull() else image
-        self.update()
-
-    def paintEvent(self, event):
-        from PySide6.QtCore import QRectF
-        from PySide6.QtGui import QPainter, QPainterPath
-        from .video_controller import drawCover
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        clip = QPainterPath()
-        clip.addRoundedRect(rect, 10, 10)
-        painter.setClipPath(clip)
-        colors = self.palette_
-        background = self.background
-        painted = False
-        if background["type"] == "gradient":
-            painter.fillRect(rect, theme.gradientFor(rect, background["colors"], background["angle"]))
-            painted = True
-        elif background["type"] == "image":
-            image = self.movie.currentImage() if self.movie is not None else self.image
-            if image is not None and not image.isNull():
-                drawCover(painter, rect, image)
-                painted = True
-        if painted:
-            painter.fillRect(rect, QColor(0, 0, 0, round(255 * background["dim"] / 100)))
-        else:
-            painter.fillRect(rect, QColor(colors["SIDEBAR"]))
-
-        def panel(color, alpha):
-            fill = QColor(color)
-            if painted:
-                fill.setAlpha(alpha)
-            return fill
-
-        margin = 8
-        playerHeight = 30
-        sidebar = QRectF(rect.x() + margin, rect.y() + margin, rect.width() * 0.26, rect.height() - margin * 2 - playerHeight)
-        pageRect = QRectF(sidebar.right() + margin, sidebar.y(), rect.right() - sidebar.right() - margin * 2, sidebar.height())
-        for area, color, alpha in ((sidebar, colors["PANEL"], 170), (pageRect, colors["BACKGROUND"], 165)):
-            path = QPainterPath()
-            path.addRoundedRect(area, 8, 8)
-            painter.fillPath(path, panel(color, alpha))
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(colors["SUBTEXT"]))
-        for row in range(3):
-            painter.drawRoundedRect(QRectF(sidebar.x() + 10, sidebar.y() + 14 + row * 18, sidebar.width() * (0.7 - row * 0.12), 7), 3, 3)
-        painter.setBrush(QColor(colors["TEXT"]))
-        painter.drawRoundedRect(QRectF(pageRect.x() + 14, pageRect.y() + 14, pageRect.width() * 0.4, 12), 4, 4)
-        painter.setBrush(QColor(colors["SUBTEXT"]))
-        painter.drawRoundedRect(QRectF(pageRect.x() + 14, pageRect.y() + 34, pageRect.width() * 0.6, 7), 3, 3)
-        painter.setBrush(QColor(colors["ACCENT"]))
-        painter.drawRoundedRect(QRectF(pageRect.x() + 14, pageRect.bottom() - 36, 70, 24), 12, 12)
-        playerRect = QRectF(rect.x(), rect.bottom() - playerHeight - margin / 2, rect.width(), playerHeight + margin / 2)
-        painter.fillRect(playerRect, panel(colors["SIDEBAR"], 150))
-        center = playerRect.center()
-        painter.setBrush(QColor(colors["TEXT"]))
-        painter.drawEllipse(center, 9, 9)
-        painter.setBrush(QColor(colors["MUTED"]))
-        painter.drawRoundedRect(QRectF(center.x() - 90, playerRect.bottom() - 7, 180, 3), 1.5, 1.5)
-        painter.setBrush(QColor(colors["ACCENT"]))
-        painter.drawRoundedRect(QRectF(center.x() - 90, playerRect.bottom() - 7, 70, 3), 1.5, 1.5)
-        painter.end()
-
-
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -719,23 +594,15 @@ class SettingsDialog(QDialog):
                     ("sidebar", "Barra e menu laterale"), ("text", "Testo"))
 
     def _buildAppearanceTab(self):
-        from PySide6.QtWidgets import QFrame, QScrollArea
+        from . import theme
         page = QWidget()
         column = QVBoxLayout(page)
         column.setSpacing(12)
-        column.setContentsMargins(4, 8, 12, 8)
-        self.chosenColors = dict(settings.get("themeColors") or {})
-        self.chosenBackground = theme.normalizeBackground(settings.get("themeBackground"))
-
-        self.themePreview = ThemePreview()
-        column.addWidget(self.themePreview)
-
-        # ----- colours -----
-        column.addWidget(_sectionTitle("Colori"))
-        hint = QLabel("I colori si applicano riavviando l'app (lo fa da sola). Lo sfondo invece si vede subito.")
+        hint = QLabel("Scegli i colori principali. Si applicano riavviando l'app (lo fa da sola).")
         hint.setObjectName("small")
         hint.setWordWrap(True)
         column.addWidget(hint)
+        self.chosenColors = dict(settings.get("themeColors") or {})
         self.colorButtons = {}
         colorForm = QFormLayout()
         colorForm.setSpacing(10)
@@ -761,132 +628,12 @@ class SettingsDialog(QDialog):
         resetButton = QPushButton("Ripristina colori originali")
         resetButton.clicked.connect(lambda: self._applyPreset({}))
         column.addWidget(resetButton, 0, Qt.AlignLeft)
-
-        # ----- background -----
-        column.addWidget(_sectionTitle("Sfondo"))
-        typeRow = QHBoxLayout()
-        self.backgroundTypeGroup = QButtonGroup(self)
-        self.backgroundTypeButtons = {}
-        for key, text in (("none", "Nessuno"), ("gradient", "Gradiente"), ("image", "Immagine o GIF")):
-            radio = QRadioButton(text)
-            self.backgroundTypeGroup.addButton(radio)
-            self.backgroundTypeButtons[key] = radio
-            radio.toggled.connect(lambda checked, backgroundType=key: checked and self._setBackgroundType(backgroundType))
-            typeRow.addWidget(radio)
-        typeRow.addStretch()
-        column.addLayout(typeRow)
-
-        self.gradientBox = QWidget()
-        gradientColumn = QVBoxLayout(self.gradientBox)
-        gradientColumn.setContentsMargins(0, 0, 0, 0)
-        gradientColumn.setSpacing(8)
-        gradientLabel = QLabel("Gradienti pronti")
-        gradientLabel.setObjectName("sub")
-        gradientColumn.addWidget(gradientLabel)
-        gradientGrid = QGridLayout()
-        gradientGrid.setSpacing(8)
-        for index, (name, colors) in enumerate(theme.GRADIENT_PRESETS.items()):
-            presetButton = QPushButton(name)
-            presetButton.setIcon(QIcon(theme.gradientPixmap(colors, 135, 36, 20, 4)))
-            presetButton.setIconSize(QSize(36, 20))
-            presetButton.clicked.connect(lambda checked=False, stops=colors: self._applyGradientPreset(stops))
-            gradientGrid.addWidget(presetButton, index // 4, index % 4)
-        gradientColumn.addLayout(gradientGrid)
-        customLabel = QLabel("Il tuo gradiente (clicca un colore per cambiarlo)")
-        customLabel.setObjectName("sub")
-        gradientColumn.addWidget(customLabel)
-        stopsRow = QHBoxLayout()
-        stopsRow.setSpacing(6)
-        self.stopsLayout = QHBoxLayout()
-        self.stopsLayout.setSpacing(6)
-        stopsRow.addLayout(self.stopsLayout)
-        self.addStopButton = QPushButton("+")
-        self.addStopButton.setToolTip("Aggiungi un colore")
-        self.addStopButton.setFixedSize(34, 30)
-        self.addStopButton.clicked.connect(self._addGradientStop)
-        self.removeStopButton = QPushButton("\u2212")
-        self.removeStopButton.setToolTip("Togli l'ultimo colore")
-        self.removeStopButton.setFixedSize(34, 30)
-        self.removeStopButton.clicked.connect(self._removeGradientStop)
-        stopsRow.addWidget(self.addStopButton)
-        stopsRow.addWidget(self.removeStopButton)
-        stopsRow.addSpacing(12)
-        stopsRow.addWidget(QLabel("Direzione"))
-        self.angleSpin = QSpinBox()
-        self.angleSpin.setRange(0, 359)
-        self.angleSpin.setWrapping(True)
-        self.angleSpin.setSingleStep(15)
-        self.angleSpin.setSuffix("°")
-        self.angleSpin.valueChanged.connect(self._setGradientAngle)
-        stopsRow.addWidget(self.angleSpin)
-        stopsRow.addStretch()
-        gradientColumn.addLayout(stopsRow)
-        column.addWidget(self.gradientBox)
-
-        self.imageBox = QWidget()
-        imageRow = QHBoxLayout(self.imageBox)
-        imageRow.setContentsMargins(0, 0, 0, 0)
-        chooseImageButton = QPushButton("Scegli immagine o GIF...")
-        chooseImageButton.clicked.connect(self._chooseBackgroundImage)
-        imageRow.addWidget(chooseImageButton)
-        self.imageNameLabel = QLabel()
-        self.imageNameLabel.setObjectName("small")
-        imageRow.addWidget(self.imageNameLabel, 1)
-        column.addWidget(self.imageBox)
-
-        self.dimBox = QWidget()
-        dimRow = QHBoxLayout(self.dimBox)
-        dimRow.setContentsMargins(0, 0, 0, 0)
-        dimRow.addWidget(QLabel("Oscuramento"))
-        from PySide6.QtWidgets import QSlider
-        self.dimSlider = QSlider(Qt.Horizontal)
-        self.dimSlider.setRange(0, 85)
-        self.dimSlider.setToolTip("Scurisce lo sfondo così il testo resta leggibile")
-        self.dimSlider.valueChanged.connect(self._setBackgroundDim)
-        dimRow.addWidget(self.dimSlider, 1)
-        self.dimLabel = QLabel()
-        self.dimLabel.setFixedWidth(40)
-        dimRow.addWidget(self.dimLabel)
-        matchButton = QPushButton("Abbina i colori allo sfondo")
-        matchButton.setToolTip("Sceglie accento e pannelli prendendo i colori dal gradiente o dall'immagine")
-        matchButton.clicked.connect(self._matchColorsToBackground)
-        dimRow.addWidget(matchButton)
-        column.addWidget(self.dimBox)
-
-        # ----- saved themes -----
-        column.addWidget(_sectionTitle("I miei temi"))
-        savedHint = QLabel("Salva colori + sfondo come un tema tuo, per ritrovarlo quando vuoi.")
-        savedHint.setObjectName("small")
-        savedHint.setWordWrap(True)
-        column.addWidget(savedHint)
-        savedRow = QHBoxLayout()
-        self.customThemeCombo = QComboBox()
-        self.customThemeCombo.setMinimumWidth(180)
-        savedRow.addWidget(self.customThemeCombo, 1)
-        self.applyThemeButton = QPushButton("Applica")
-        self.applyThemeButton.clicked.connect(self._applyCustomTheme)
-        savedRow.addWidget(self.applyThemeButton)
-        self.deleteThemeButton = QPushButton("Elimina")
-        self.deleteThemeButton.clicked.connect(self._deleteCustomTheme)
-        savedRow.addWidget(self.deleteThemeButton)
-        saveThemeButton = QPushButton("Salva come tema...")
-        saveThemeButton.setObjectName("accent")
-        saveThemeButton.clicked.connect(self._saveCustomTheme)
-        savedRow.addWidget(saveThemeButton)
-        column.addLayout(savedRow)
         column.addStretch()
-
-        self._refreshCustomThemes()
         self._refreshColorButtons()
-        self._refreshBackgroundControls()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setWidget(page)
-        scroll.setMinimumHeight(460)
-        return scroll
+        return page
 
     def _currentColor(self, key):
+        from . import theme
         return self.chosenColors.get(key) or theme.DEFAULT_COLORS[key]
 
     def _refreshColorButtons(self):
@@ -895,7 +642,6 @@ class SettingsDialog(QDialog):
             textColor = "#000000" if color.lightnessF() > 0.55 else "#FFFFFF"
             button.setText(color.name().upper())
             button.setStyleSheet(f"QPushButton {{ background: {color.name()}; color: {textColor}; border: 1px solid #555; border-radius: 6px; }}")
-        self._refreshPreview()
 
     def _pickColor(self, key):
         from PySide6.QtWidgets import QColorDialog
@@ -908,165 +654,12 @@ class SettingsDialog(QDialog):
         self.chosenColors = dict(preset)
         self._refreshColorButtons()
 
-    # ----- background -----
-    def _refreshPreview(self):
-        if hasattr(self, "themePreview") and hasattr(self, "chosenBackground"):
-            self.themePreview.setTheme(self.chosenColors, self.chosenBackground)
-
-    def _refreshBackgroundControls(self):
-        background = self.chosenBackground
-        backgroundType = background["type"]
-        radio = self.backgroundTypeButtons[backgroundType]
-        if not radio.isChecked():
-            radio.blockSignals(True)
-            radio.setChecked(True)
-            radio.blockSignals(False)
-        self.gradientBox.setVisible(backgroundType == "gradient")
-        self.imageBox.setVisible(backgroundType == "image")
-        self.dimBox.setVisible(backgroundType != "none")
-        while self.stopsLayout.count():
-            item = self.stopsLayout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        for index, color in enumerate(background["colors"]):
-            button = QPushButton()
-            button.setFixedSize(34, 30)
-            button.setToolTip(color)
-            button.setStyleSheet(f"QPushButton {{ background: {color}; border: 1px solid #555; border-radius: 6px; }}")
-            button.clicked.connect(lambda checked=False, stopIndex=index: self._pickGradientStop(stopIndex))
-            self.stopsLayout.addWidget(button)
-        self.addStopButton.setEnabled(len(background["colors"]) < theme.MAX_GRADIENT_COLORS)
-        self.removeStopButton.setEnabled(len(background["colors"]) > 2)
-        self.angleSpin.blockSignals(True)
-        self.angleSpin.setValue(background["angle"])
-        self.angleSpin.blockSignals(False)
-        self.dimSlider.blockSignals(True)
-        self.dimSlider.setValue(background["dim"])
-        self.dimSlider.blockSignals(False)
-        self.dimLabel.setText(f"{background['dim']}%")
-        path = background.get("path") or ""
-        self.imageNameLabel.setText(os.path.basename(path) if path else "Nessun file scelto")
-        self._refreshPreview()
-
-    def _setBackgroundType(self, backgroundType):
-        if backgroundType == "image" and not self.chosenBackground.get("path"):
-            self._chooseBackgroundImage()
-            if not self.chosenBackground.get("path"):
-                self._refreshBackgroundControls()
-                return
-        self.chosenBackground["type"] = backgroundType
-        self._refreshBackgroundControls()
-
-    def _applyGradientPreset(self, colors):
-        self.chosenBackground.update(type="gradient", colors=list(colors))
-        self._refreshBackgroundControls()
-
-    def _pickGradientStop(self, index):
-        from PySide6.QtWidgets import QColorDialog
-        color = QColorDialog.getColor(QColor(self.chosenBackground["colors"][index]), self, "Scegli un colore")
-        if color.isValid():
-            self.chosenBackground["colors"][index] = color.name().upper()
-            self._refreshBackgroundControls()
-
-    def _addGradientStop(self):
-        colors = self.chosenBackground["colors"]
-        if len(colors) < theme.MAX_GRADIENT_COLORS:
-            colors.append(QColor(colors[-1]).lighter(140).name().upper())
-            self._refreshBackgroundControls()
-
-    def _removeGradientStop(self):
-        if len(self.chosenBackground["colors"]) > 2:
-            self.chosenBackground["colors"].pop()
-            self._refreshBackgroundControls()
-
-    def _setGradientAngle(self, angle):
-        self.chosenBackground["angle"] = angle
-        self._refreshPreview()
-
-    def _setBackgroundDim(self, dim):
-        self.chosenBackground["dim"] = dim
-        self.dimLabel.setText(f"{dim}%")
-        self._refreshPreview()
-
-    def _chooseBackgroundImage(self):
-        filePath, _ = QFileDialog.getOpenFileName(self, "Scegli lo sfondo", os.path.expanduser("~"), IMAGE_FILTER)
-        if not filePath:
-            return
-        storedPath = storeBackground(filePath)
-        if not storedPath:
-            QMessageBox.warning(self, APP_NAME, "Non riesco ad aprire questa immagine.")
-            return
-        self.chosenBackground.update(type="image", path=storedPath)
-        self._refreshBackgroundControls()
-
-    def _matchColorsToBackground(self):
-        background = self.chosenBackground
-        if background["type"] == "gradient":
-            colors = theme.themeColorsFrom(background["colors"])
-        elif background["type"] == "image":
-            from .effects import dominantColor
-            color = dominantColor(background["path"])
-            colors = theme.themeColorsFrom([color.name()]) if color is not None else {}
-        else:
-            colors = {}
-        if colors:
-            self.chosenColors = colors
-            self._refreshColorButtons()
-
-    # ----- saved themes -----
-    def _refreshCustomThemes(self, selected=None):
-        themes = settings.get("customThemes") or {}
-        self.customThemeCombo.clear()
-        self.customThemeCombo.addItems(sorted(themes, key=str.lower))
-        if selected:
-            self.customThemeCombo.setCurrentText(selected)
-        hasThemes = bool(themes)
-        self.customThemeCombo.setEnabled(hasThemes)
-        if not hasThemes:
-            self.customThemeCombo.setPlaceholderText("Nessun tema salvato")
-        self.applyThemeButton.setEnabled(hasThemes)
-        self.deleteThemeButton.setEnabled(hasThemes)
-
-    def _saveCustomTheme(self):
-        from PySide6.QtWidgets import QInputDialog
-        name, accepted = QInputDialog.getText(self, "Salva tema", "Nome del tema:", text=self.customThemeCombo.currentText())
-        name = name.strip()
-        if not accepted or not name:
-            return
-        themes = dict(settings.get("customThemes") or {})
-        if name in themes and QMessageBox.question(self, APP_NAME, f"Sostituire il tema \"{name}\"?") != QMessageBox.Yes:
-            return
-        themes[name] = {"colors": dict(self.chosenColors), "background": dict(self.chosenBackground, colors=list(self.chosenBackground["colors"]))}
-        settings.set("customThemes", themes)
-        settings.save()
-        self._refreshCustomThemes(name)
-
-    def _applyCustomTheme(self, name=None):
-        name = name or self.customThemeCombo.currentText()
-        saved = (settings.get("customThemes") or {}).get(name)
-        if not saved:
-            return
-        self.chosenColors = dict(saved.get("colors") or {})
-        self.chosenBackground = theme.normalizeBackground(saved.get("background"))
-        self._refreshColorButtons()
-        self._refreshBackgroundControls()
-
-    def _deleteCustomTheme(self):
-        name = self.customThemeCombo.currentText()
-        themes = dict(settings.get("customThemes") or {})
-        if name not in themes or QMessageBox.question(self, APP_NAME, f"Eliminare il tema \"{name}\"?") != QMessageBox.Yes:
-            return
-        themes.pop(name)
-        settings.set("customThemes", themes)
-        settings.save()
-        self._refreshCustomThemes()
-
     def _buildEffectsTab(self):
         page = QWidget()
         column = QVBoxLayout(page)
         column.setSpacing(10)
         self.effectChecks = {}
-        for key, text in (("fxTransitions", "Transizioni: popup morbidi, card che si illuminano, bottoni che rimbalzano"),
+        for key, text in (("fxTransitions", "Transizioni: pagine che sfumano, popup morbidi, card che si illuminano, bottoni che rimbalzano"),
                           ("fxCoverColors", "Colori dalla copertina: la barra e \"In riproduzione\" cambiano colore con la canzone"),
                           ("fxVisualizer", "Visualizer: barre che si muovono a ritmo"),
                           ("fxMicro", "Micro-effetti: cuore che esplode al like, copertina che pulsa sui bassi"),
@@ -1100,7 +693,6 @@ class SettingsDialog(QDialog):
             settings.set(key, check.isChecked())
         colorsChanged = (settings.get("themeColors") or {}) != self.chosenColors
         settings.set("themeColors", dict(self.chosenColors))
-        settings.set("themeBackground", theme.normalizeBackground(self.chosenBackground))
         self.restartForColors = colorsChanged
         settings.set("discordPresence", self.discordCheck.isChecked())
         settings.set("discordClientId", "".join(character for character in self.discordIdEdit.text() if character.isdigit()))

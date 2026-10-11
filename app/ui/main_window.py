@@ -20,6 +20,7 @@ from ..downloader import DownloadManager
 from ..media_keys import MediaSession
 from ..session_link import parseCode
 from ..playlist_sync import SharedPlaylists
+from . import effects
 from ..session_link import linkFor
 from ..together import TogetherController
 from ..player import Player
@@ -154,7 +155,6 @@ class MainWindow(QMainWindow):
         central = BackdropWidget(self.videoController)
         central.setObjectName("backdrop")
         self.backdrop = central
-        self.translucentUi = False
         self.setCentralWidget(central)
         rootLayout = QVBoxLayout(central)
         rootLayout.setContentsMargins(8, 8, 8, 0)
@@ -296,7 +296,6 @@ class MainWindow(QMainWindow):
         QApplication.instance().applicationStateChanged.connect(lambda state: self._updateVideoSuspend())
         QApplication.instance().applicationStateChanged.connect(
             lambda state: state == Qt.ApplicationActive and QTimer.singleShot(300, self.updateAmbient))
-        self.applyThemeBackground()
         self.updateAmbient()
 
     # ---------- layout ----------
@@ -396,7 +395,7 @@ class MainWindow(QMainWindow):
             page.refresh()
         current = self.player.currentSong()
         page.setCurrent(current.get("id") if current else None, self.player.isPlaying())
-        self.pages.setCurrentWidget(page)
+        effects.switchPage(self.pages, page)
         for navKey, button in self.navButtons.items():
             button.setChecked(navKey == key)
         if key != "playlist":
@@ -1307,7 +1306,8 @@ class MainWindow(QMainWindow):
         active = wanted and self.videoController.hasFrames()
         if active != self.ambientActive:
             self.ambientActive = active
-            self._applyStylesheet()
+            application = QApplication.instance()
+            application.setStyleSheet(theme.STYLESHEET + (theme.AMBIENT_STYLESHEET if active else ""))
             if active:
                 self.idleTimer.start()
                 self.cursorTimer.start()
@@ -1316,24 +1316,10 @@ class MainWindow(QMainWindow):
                 self._showInterface()
         self.backdrop.setActive(active, self.uiVisible)
 
-    def _applyStylesheet(self):
-        """See-through panels whenever something is painted behind the UI (song video or theme background)."""
-        translucent = self.ambientActive or self.backdrop.hasThemeBackground()
-        if translucent != self.translucentUi:
-            self.translucentUi = translucent
-            QApplication.instance().setStyleSheet(theme.STYLESHEET + (theme.AMBIENT_STYLESHEET if translucent else ""))
-
-    def applyThemeBackground(self):
-        self.backdrop.setThemeBackground(theme.normalizeBackground(settings.get("themeBackground")))
-        self._applyStylesheet()
-        self._updateVideoSuspend()
-
     def _updateVideoSuspend(self):
         inBackground = QApplication.instance().applicationState() != Qt.ApplicationActive
         suspended = self.isMinimized() or (inBackground and bool(settings.get("pauseVideoInBackground")))
         self.videoController.setSuspended(suspended)
-        if getattr(self, "backdrop", None) is not None:
-            self.backdrop.setPaused(suspended)
         if suspended:
             self.cursorTimer.stop()
         elif self.ambientActive:
@@ -1665,10 +1651,9 @@ class MainWindow(QMainWindow):
         showInFolder(path)
 
     # ---------- spotify ----------
-    def askImportLink(self):
-        link, accepted = QInputDialog.getText(self, "Importa playlist",
-                                              "Incolla il link di una playlist, album o brano da\n"
-                                              "Spotify, YouTube, YouTube Music o Apple Music (deve essere pubblico):")
+    def askSpotifyLink(self):
+        link, accepted = QInputDialog.getText(self, "Importa da Spotify",
+                                              "Incolla il link di una playlist, album o brano Spotify (deve essere pubblico):")
         if accepted and link.strip():
             self.navigate("search")
             self.searchPage.searchEdit.setText(link.strip())
@@ -1679,8 +1664,7 @@ class MainWindow(QMainWindow):
         if info["kind"] == "track":
             self.downloadSpotifyTracks(tracks, None)
             return
-        source = info.get("source") or "Spotify"
-        playlistId = self.database.createPlaylist(info["name"] or f"Playlist {source}", info.get("description") or f"Importata da {source}",
+        playlistId = self.database.createPlaylist(info["name"] or "Playlist Spotify", info.get("description") or "Importata da Spotify",
                                                   info.get("coverPath"))
         self.downloadSpotifyTracks(tracks, playlistId)
         self.refreshPlaylists()
@@ -1703,7 +1687,7 @@ class MainWindow(QMainWindow):
             queued += 1
             self.downloads.enqueue({
                 "title": f"{trackInfo['artist']} - {trackInfo['title']}" if trackInfo["artist"] else trackInfo["title"],
-                "channel": trackInfo.get("source") or "Spotify",
+                "channel": "Spotify",
                 "duration": trackInfo["durationMs"] / 1000,
                 "url": None,
                 "thumbnail": trackInfo.get("image"),
@@ -1771,7 +1755,6 @@ class MainWindow(QMainWindow):
         if dialog.exec() == SettingsDialog.Accepted:
             self.applyDiscordSetting()
             self.applyEffectSettings()
-            self.applyThemeBackground()
             self.updateAmbient()
             self.nowPlayingPage._loadVideo()
             if dialog.restartForColors:

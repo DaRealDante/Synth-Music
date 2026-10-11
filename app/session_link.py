@@ -1,12 +1,9 @@
-import collections
 import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
-import threading
-import time
 import uuid
 import zlib
 
@@ -16,14 +13,9 @@ CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ROOM_PREFIX = "SYNTH"
 PLAYLIST_PREFIX = "SYNTHP"
 LINK_SCHEME = "synthmusic://join/"
-# Every server has a normal TLS port and a WebSocket-over-TLS one (like a website): if a network blocks one, the other is tried.
-DEFAULT_BROKERS = [
-    [("broker.hivemq.com", 8883, True, None), ("broker.hivemq.com", 8884, True, "/mqtt")],
-    [("broker.emqx.io", 8883, True, None), ("broker.emqx.io", 8084, True, "/mqtt")],
-    [("test.mosquitto.org", 8886, True, None), ("test.mosquitto.org", 8081, True, "/")],
-]
-ENDPOINT_SWITCH_SECONDS = 8
+DEFAULT_BROKERS = [("broker.hivemq.com", 8883, True), ("broker.emqx.io", 8883, True), ("test.mosquitto.org", 8886, True)]
 MAX_PAYLOAD = 2 * 1024 * 1024
+PRIMARY_RETRY_MS = 5 * 60 * 1000
 _CODE_PATTERN = re.compile(r"(SYNTHP|SYNTH)-([A-Z0-9]{4})-([A-Z0-9]{4})")
 
 
@@ -52,21 +44,14 @@ def linkFor(code):
 
 
 def brokerList():
-    """List of servers; each server is a list of endpoints (host, port, tls, websocketPath or None).
-    SYNTH_BROKERS="host:port:tls[:wspath]|other endpoint of the same server,next server,..."."""
     configured = os.environ.get("SYNTH_BROKERS", "").strip()
     if not configured:
-        return [list(endpoints) for endpoints in DEFAULT_BROKERS]
-    servers = []
-    for server in configured.split(","):
-        endpoints = []
-        for item in server.split("|"):
-            parts = item.split(":")
-            host, port, useTls = (parts + ["1"])[:3]
-            path = parts[3] if len(parts) > 3 and parts[3] else None
-            endpoints.append((host, int(port), useTls not in ("0", "false", ""), path))
-        servers.append(endpoints)
-    return servers
+        return list(DEFAULT_BROKERS)
+    brokers = []
+    for item in configured.split(","):
+        host, port, useTls = (item.split(":") + ["1"])[:3]
+        brokers.append((host, int(port), useTls not in ("0", "false", "")))
+    return brokers
 
 
 class CodeBox:
@@ -114,71 +99,137 @@ class CodeBox:
             return None
 
 
-class _BrokerConnection:
-    """One always-retrying MQTT connection to one public server (paho reconnects by itself)."""
+class Link(QObject):
+    """One MQTT connection to the first public broker that answers; reconnects and fails over by itself."""
 
-    def __init__(self, link, index, endpoints):
-        self.link = link
-        self.index = index
-        self.endpoints = list(endpoints)
-        self.endpointIndex = 0
+    received = Signal(str, str, object)
+    connectedChanged = Signal(bool)
+    _connectResult = Signal(int, str)
+    _incoming = Signal(str, bytes)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.boxes = {}
+        self.subtopics = {}
+        self.retainedOut = {}
+        self.will = None
         self.client = None
-        self.connected = False
+        self.brokers = brokerList()
+        self.brokerIndex = 0
         self.attempt = 0
-        self.startedAt = 0.0
-        self.lastError = ""
+        self.connected = False
+        self.running = False
+        self.failures = 0
+        self._connectResult.connect(self._onConnectResult)
+        self._incoming.connect(self._onIncoming)
+        self.retryTimer = QTimer(self)
+        self.retryTimer.setSingleShot(True)
+        self.retryTimer.timeout.connect(self._connect)
+        self.primaryTimer = QTimer(self)
+        self.primaryTimer.setInterval(PRIMARY_RETRY_MS)
+        self.primaryTimer.timeout.connect(self._backToPrimary)
 
-    @property
-    def host(self):
-        return self.endpoints[self.endpointIndex][0]
+    # ---------- public API ----------
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self._connect()
 
-    def describe(self):
-        host, port, useTls, path = self.endpoints[self.endpointIndex]
-        return f"{host}:{port}" + (" (web)" if path else "")
+    def stop(self):
+        self.running = False
+        self.retryTimer.stop()
+        self.primaryTimer.stop()
+        self._dropClient(graceful=True)
+        self._setConnected(False)
 
-    def switchEndpoint(self):
-        """No answer from this port: try the next one of the same server (e.g. the WebSocket port)."""
-        if len(self.endpoints) > 1:
-            self.endpointIndex = (self.endpointIndex + 1) % len(self.endpoints)
-        self.connect()
+    def restart(self):
+        self._dropClient(graceful=True)
+        self._setConnected(False)
+        if self.running:
+            self._connect()
 
-    def connect(self):
+    def watch(self, code, subtopics):
+        box = self.boxes.get(code) or CodeBox(code)
+        self.boxes[code] = box
+        self.subtopics[code] = list(subtopics)
+        if self.connected and self.client is not None:
+            for subtopic in subtopics:
+                self.client.subscribe(f"{box.topicBase}/{subtopic}", qos=1)
+
+    def unwatch(self, code):
+        box = self.boxes.pop(code, None)
+        subtopics = self.subtopics.pop(code, [])
+        for key in [key for key in self.retainedOut if key[0] == code]:
+            del self.retainedOut[key]
+        if box is not None and self.connected and self.client is not None:
+            for subtopic in subtopics:
+                self.client.unsubscribe(f"{box.topicBase}/{subtopic}")
+
+    def setWill(self, code, subtopic):
+        """Empty retained message the broker publishes if this app disappears (crash, internet down)."""
+        self.will = (code, subtopic) if code else None
+
+    def publish(self, code, subtopic, payload, retain=False):
+        box = self.boxes.get(code) or CodeBox(code)
+        self.boxes.setdefault(code, box)
+        data = box.seal(payload)
+        if retain:
+            self.retainedOut[(code, subtopic)] = data
+        if self.client is not None:
+            self.client.publish(f"{box.topicBase}/{subtopic}", data, qos=1, retain=retain)
+
+    def clearRetained(self, code, subtopic):
+        self.retainedOut.pop((code, subtopic), None)
+        box = self.boxes.get(code) or CodeBox(code)
+        if self.client is not None:
+            info = self.client.publish(f"{box.topicBase}/{subtopic}", b"", qos=1, retain=True)
+            try:
+                info.wait_for_publish(1.5)
+            except Exception:
+                pass
+
+    def isConnected(self):
+        return self.connected
+
+    def brokerName(self):
+        return self.brokers[self.brokerIndex][0] if self.brokers else ""
+
+    # ---------- connection ----------
+    def _connect(self):
+        if not self.running:
+            return
         import paho.mqtt.client as mqtt
-        self.drop(graceful=False)
+        self._dropClient(graceful=False)
         self.attempt += 1
         attempt = self.attempt
-        self.startedAt = time.monotonic()
-        host, port, useTls, path = self.endpoints[self.endpointIndex]
+        host, port, useTls = self.brokers[self.brokerIndex % len(self.brokers)]
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"synth-{uuid.uuid4().hex[:16]}",
-                             protocol=mqtt.MQTTv311, clean_session=True, transport="websockets" if path else "tcp")
-        if path:
-            client.ws_set_options(path=path)
+                             protocol=mqtt.MQTTv311, clean_session=True)
         client.max_queued_messages_set(200)
         if useTls:
             client.tls_set()
-        will = self.link.will
-        if will:
-            box = self.link.boxes.get(will[0]) or CodeBox(will[0])
-            client.will_set(f"{box.topicBase}/{will[1]}", b"", qos=1, retain=True)
-        client.reconnect_delay_set(1, 30)
-        index = self.index
+        if self.will:
+            box = self.boxes.get(self.will[0]) or CodeBox(self.will[0])
+            client.will_set(f"{box.topicBase}/{self.will[1]}", b"", qos=1, retain=True)
+        client.reconnect_delay_set(1, 20)
+
+        attemptState = {"confirmed": False}
 
         def onConnect(clientRef, userdata, flags, reasonCode, properties):
-            if reasonCode.is_failure:
-                self.lastError = f"rifiutato ({reasonCode})"
-            self.link._connectionEvent.emit(index, attempt, not reasonCode.is_failure)
+            attemptState["confirmed"] = not reasonCode.is_failure
+            self._connectResult.emit(attempt, "failed" if reasonCode.is_failure else "connected")
 
         def onConnectFail(clientRef, userdata):
-            self.lastError = "connessione fallita (porta bloccata o server giù)"
-            self.link._connectionEvent.emit(index, attempt, False)
+            self._connectResult.emit(attempt, "failed")
 
         def onDisconnect(clientRef, userdata, flags, reasonCode, properties):
-            if reasonCode.is_failure:
-                self.lastError = f"disconnesso ({reasonCode})"
-            self.link._connectionEvent.emit(index, attempt, False)
+            confirmed = attemptState["confirmed"]
+            attemptState["confirmed"] = False
+            self._connectResult.emit(attempt, "lost" if confirmed else "failed")
 
         def onMessage(clientRef, userdata, message):
-            self.link._incoming.emit(index, message.topic, bytes(message.payload))
+            self._incoming.emit(message.topic, bytes(message.payload))
 
         client.on_connect = onConnect
         client.on_connect_fail = onConnectFail
@@ -189,226 +240,71 @@ class _BrokerConnection:
             client.connect_async(host, port, keepalive=30)
             client.loop_start()
         except Exception as error:
-            self.lastError = repr(error)
-            print(f"[Link] {self.describe()} non raggiungibile: {error!r}")
+            print(f"[Link] {host}:{port} non raggiungibile: {error!r}")
+            self._connectResult.emit(attempt, "failed")
 
-    def drop(self, graceful):
-        client = self.client
-        self.client = None
-        self.connected = False
-        self.attempt += 1
-        if client is None:
+    def _onConnectResult(self, attempt, result):
+        if attempt != self.attempt or not self.running:
             return
-        client.on_connect = None
-        client.on_connect_fail = None
-        client.on_disconnect = None
-        client.on_message = None
-
-        def close():
-            # In the background: a server that never answers keeps paho's thread stuck in the handshake,
-            # and waiting for it here froze the whole app for up to 30 seconds.
-            try:
-                if graceful:
-                    client.disconnect()
-                client.loop_stop()
-            except Exception:
-                pass
-
-        threading.Thread(target=close, daemon=True).start()
-
-    def publish(self, topic, data, retain):
-        if self.client is not None:
-            return self.client.publish(topic, data, qos=1, retain=retain)
-        return None
-
-
-class Link(QObject):
-    """Connected to ALL the public servers at once: friends meet even if one of them can't reach a server.
-    Every message goes to every server; duplicates are dropped on arrival."""
-
-    received = Signal(str, str, object)
-    connectedChanged = Signal(bool)
-    _connectionEvent = Signal(int, int, bool)
-    _incoming = Signal(int, str, bytes)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.boxes = {}
-        self.subtopics = {}
-        self.retainedOut = {}
-        self.will = None
-        self.brokers = brokerList()
-        self.connections = [_BrokerConnection(self, index, endpoints) for index, endpoints in enumerate(self.brokers)]
-        self.switchSeconds = ENDPOINT_SWITCH_SECONDS
-        self.watchdog = QTimer(self)
-        self.watchdog.setInterval(1000)
-        self.watchdog.timeout.connect(self._checkEndpoints)
-        self.connected = False
-        self.running = False
-        self.seenMessages = collections.OrderedDict()
-        self.retainedSeen = {}
-        self._connectionEvent.connect(self._onConnectionEvent)
-        self._incoming.connect(self._onIncoming)
-
-    # ---------- public API ----------
-    def start(self):
-        if self.running:
-            return
-        self.running = True
-        for connection in self.connections:
-            connection.connect()
-        self.watchdog.start()
-
-    def stop(self):
-        self.running = False
-        self.watchdog.stop()
-        for connection in self.connections:
-            connection.drop(graceful=True)
-        self.retainedSeen.clear()
-        self.seenMessages.clear()
-        self._updateConnected()
-
-    def restart(self):
-        for connection in self.connections:
-            connection.drop(graceful=True)
-        self.retainedSeen.clear()
-        self.seenMessages.clear()
-        self._updateConnected()
-        if self.running:
-            for connection in self.connections:
-                connection.connect()
-
-    def watch(self, code, subtopics):
-        box = self.boxes.get(code) or CodeBox(code)
-        self.boxes[code] = box
-        self.subtopics[code] = list(subtopics)
-        for connection in self.connections:
-            if connection.connected and connection.client is not None:
-                for subtopic in subtopics:
-                    connection.client.subscribe(f"{box.topicBase}/{subtopic}", qos=1)
-
-    def unwatch(self, code):
-        box = self.boxes.pop(code, None)
-        subtopics = self.subtopics.pop(code, [])
-        for key in [key for key in self.retainedOut if key[0] == code]:
-            del self.retainedOut[key]
-        for key in [key for key in self.retainedSeen if key[0] == code]:
-            del self.retainedSeen[key]
-        if box is not None:
-            for connection in self.connections:
-                if connection.connected and connection.client is not None:
-                    for subtopic in subtopics:
-                        connection.client.unsubscribe(f"{box.topicBase}/{subtopic}")
-
-    def setWill(self, code, subtopic):
-        """Empty retained message the servers publish if this app disappears (crash, internet down)."""
-        self.will = (code, subtopic) if code else None
-
-    def publish(self, code, subtopic, payload, retain=False):
-        box = self.boxes.get(code) or CodeBox(code)
-        self.boxes.setdefault(code, box)
-        if isinstance(payload, dict):
-            payload = dict(payload, _mid=uuid.uuid4().hex[:16])
-        data = box.seal(payload)
-        if retain:
-            self.retainedOut[(code, subtopic)] = data
-        for connection in self.connections:
-            connection.publish(f"{box.topicBase}/{subtopic}", data, retain)
-
-    def clearRetained(self, code, subtopic):
-        self.retainedOut.pop((code, subtopic), None)
-        box = self.boxes.get(code) or CodeBox(code)
-        infos = [connection.publish(f"{box.topicBase}/{subtopic}", b"", True) for connection in self.connections
-                 if connection.connected]
-        deadline = time.monotonic() + 1.0
-        for info in infos:
-            try:
-                if info is not None:
-                    info.wait_for_publish(max(0.05, deadline - time.monotonic()))
-            except Exception:
-                pass
-
-    def isConnected(self):
-        return self.connected
-
-    def brokerName(self):
-        return ", ".join(connection.describe() for connection in self.connections if connection.connected)
-
-    def connectedCount(self):
-        return sum(1 for connection in self.connections if connection.connected)
-
-    # ---------- connection ----------
-    def _checkEndpoints(self):
-        if not self.running:
-            return
-        for connection in self.connections:
-            if not connection.connected and time.monotonic() - connection.startedAt > self.switchSeconds:
-                connection.lastError = connection.lastError or f"nessuna risposta in {self.switchSeconds}s"
-                print(f"[Link] {connection.describe()} non risponde ({connection.lastError}), provo un'altra porta")
-                connection.switchEndpoint()
-
-    def _onConnectionEvent(self, index, attempt, success):
-        connection = self.connections[index]
-        if attempt != connection.attempt or not self.running:
-            return
-        if success:
-            connection.connected = True
-            connection.lastError = ""
-            connection.loggedError = ""
-            print(f"[Link] connesso a {connection.describe()}")
+        if result == "connected":
+            self.failures = 0
             for code, subtopics in self.subtopics.items():
                 box = self.boxes[code]
                 for subtopic in subtopics:
-                    connection.client.subscribe(f"{box.topicBase}/{subtopic}", qos=1)
+                    self.client.subscribe(f"{box.topicBase}/{subtopic}", qos=1)
             for (code, subtopic), data in self.retainedOut.items():
-                connection.publish(f"{self.boxes[code].topicBase}/{subtopic}", data, True)
-        else:
-            if connection.lastError and connection.lastError != getattr(connection, "loggedError", ""):
-                connection.loggedError = connection.lastError
-                print(f"[Link] {connection.describe()}: {connection.lastError}")
-            if connection.connected:
-                print(f"[Link] connessione persa con {connection.describe()}, riprovo")
-                connection.startedAt = time.monotonic()
-            connection.connected = False
-            for key in list(self.retainedSeen):
-                self.retainedSeen[key].discard(index)
-        self._updateConnected()
+                self.client.publish(f"{self.boxes[code].topicBase}/{subtopic}", data, qos=1, retain=True)
+            self._setConnected(True)
+            if self.brokerIndex != 0:
+                self.primaryTimer.start()
+            else:
+                self.primaryTimer.stop()
+            return
+        self._setConnected(False)
+        if result == "lost":
+            return
+        self.failures += 1
+        if self.failures >= 2:
+            self.failures = 0
+            self.brokerIndex = (self.brokerIndex + 1) % len(self.brokers)
+            print(f"[Link] passo al server {self.brokerName()}")
+            self.retryTimer.start(500)
 
-    def _updateConnected(self):
-        connected = any(connection.connected for connection in self.connections)
+    def _backToPrimary(self):
+        """Everybody prefers the first server: after a failover, go back to it so friends end up on the same one."""
+        self.primaryTimer.stop()
+        if self.running and self.brokerIndex != 0:
+            self.brokerIndex = 0
+            self.failures = 0
+            self.restart()
+
+    def _dropClient(self, graceful):
+        client = self.client
+        self.client = None
+        self.attempt += 1
+        if client is None:
+            return
+        try:
+            if graceful:
+                client.disconnect()
+            client.loop_stop()
+        except Exception:
+            pass
+
+    def _setConnected(self, connected):
         if connected != self.connected:
             self.connected = connected
             self.connectedChanged.emit(connected)
 
-    def _onIncoming(self, index, topic, data):
+    def _onIncoming(self, topic, data):
         for code, box in list(self.boxes.items()):
             prefix = box.topicBase + "/"
-            if not topic.startswith(prefix):
-                continue
-            subtopic = topic[len(prefix):]
-            key = (code, subtopic)
-            if not data:
-                holders = self.retainedSeen.get(key)
-                if holders is not None:
-                    holders.discard(index)
-                    if holders:
-                        return
-                    del self.retainedSeen[key]
-                self.received.emit(code, subtopic, None)
-                return
-            payload = box.open(data)
-            if payload is None:
-                return
-            messageId = payload.pop("_mid", None) if isinstance(payload, dict) else None
-            if messageId:
-                firstTime = messageId not in self.seenMessages
-                self.seenMessages[messageId] = True
-                while len(self.seenMessages) > 2000:
-                    self.seenMessages.popitem(last=False)
-                self.retainedSeen.setdefault(key, set()).add(index)
-                if not firstTime:
+            if topic.startswith(prefix):
+                subtopic = topic[len(prefix):]
+                if not data:
+                    self.received.emit(code, subtopic, None)
                     return
-            else:
-                self.retainedSeen.setdefault(key, set()).add(index)
-            self.received.emit(code, subtopic, payload)
-            return
+                payload = box.open(data)
+                if payload is not None:
+                    self.received.emit(code, subtopic, payload)
+                return

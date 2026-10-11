@@ -256,10 +256,7 @@ class TogetherPopup(QFrame):
             copyRow.addWidget(copyCodeButton)
             layout.addLayout(copyRow)
             connected = self.controller.link.isConnected()
-            link = self.controller.link
-            serverCount = f" ({link.connectedCount()}/{len(link.connections)} server)" if connected else ""
-            statusLabel = QLabel(("● Connesso" + serverCount) if connected else "● Connessione in corso...")
-            statusLabel.setToolTip(link.brokerName() if connected else "Provo tutti i server, anche dalla porta web")
+            statusLabel = QLabel("● Connesso" if connected else "● Connessione in corso...")
             statusLabel.setObjectName("small")
             statusLabel.setStyleSheet(f"color: {theme.ACCENT if connected else '#F59B23'};")
             layout.addWidget(statusLabel)
@@ -291,10 +288,6 @@ class TogetherPopup(QFrame):
             leaveButton = QPushButton("Esci dalla stanza")
             leaveButton.clicked.connect(self.controller.leaveRoom)
             layout.addWidget(leaveButton)
-            diagnosticsButton = QPushButton("Copia diagnostica")
-            diagnosticsButton.setToolTip("Copia lo stato della connessione e il log: incollalo nella chat per farlo controllare")
-            diagnosticsButton.clicked.connect(self._copyDiagnostics)
-            layout.addWidget(diagnosticsButton)
         for label in self.content.findChildren(QLabel):
             if label.wordWrap():
                 label.setMinimumHeight(label.heightForWidth(self.width() - 32))
@@ -309,11 +302,6 @@ class TogetherPopup(QFrame):
         delayMs = value * 50
         self._showDelay(delayMs)
         self.controller.setDelay(delayMs)
-
-    def _copyDiagnostics(self):
-        from .. import diagnostics
-        from ..config import VERSION
-        self._copy(diagnostics.report(self.controller, VERSION), "Diagnostica copiata: incollala nella chat")
 
     def _copy(self, text, message):
         QGuiApplication.clipboard().setText(text)
@@ -350,13 +338,4 @@ class TogetherPopup(QFrame):
     def _place(self):
         self.adjustSize()
         position = self.anchor.mapToGlobal(self.anchor.rect().topLeft())
-        x = position.x() + self.anchor.width() - self.width()
-        y = position.y() - self.height() - 8
-        # Keep it on the monitor of the button: clamping to 0 threw it onto the other screen
-        # when the app is on a monitor placed left of / above the main one (negative coordinates).
-        screen = self.anchor.screen()
-        if screen is not None:
-            area = screen.availableGeometry()
-            x = max(area.left(), min(x, area.right() - self.width()))
-            y = max(area.top(), min(y, area.bottom() - self.height()))
-        self.move(x, y)
+        self.move(max(0, position.x() + self.anchor.width() - self.width()), max(0, position.y() - self.height() - 8))

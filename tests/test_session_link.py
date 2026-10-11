@@ -5,7 +5,7 @@ import sys
 import textwrap
 
 from app.session_link import CodeBox, Link, linkFor, makeCode, parseCode
-from tests.broker import localBroker, pump, secondBroker, waitFor, webSocketBroker  # noqa: F401
+from tests.broker import localBroker, pump, waitFor  # noqa: F401
 
 
 def test_sealOpenRoundTrip():
@@ -83,12 +83,7 @@ def test_willClearsPresenceWhenAppDies(localBroker):
             app.processEvents(); time.sleep(0.01)
     """)
     process = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, env=dict(os.environ))
-    line = b""
-    for _ in range(10):
-        line = process.stdout.readline().strip()
-        if line == b"ready" or not line:
-            break
-    assert line == b"ready"
+    assert process.stdout.readline().strip() == b"ready"
     watcher = Link()
     events = []
     watcher.received.connect(lambda c, subtopic, payload: events.append((subtopic, payload)))
@@ -111,7 +106,7 @@ def test_failoverToSecondBroker(localBroker):
         link.watch(makeCode(), ["state"])
         link.start()
         assert waitFor(link.isConnected, timeout=20)
-        assert [c.connected for c in link.connections] == [False, True]
+        assert link.brokerIndex == 1
         link.stop()
     finally:
         os.environ["SYNTH_BROKERS"] = previous
@@ -145,144 +140,9 @@ def test_failoverWhenBrokerDropsBeforeConfirming(localBroker):
         link.watch(makeCode(), ["state"])
         link.start()
         assert waitFor(link.isConnected, timeout=25)
-        assert [c.connected for c in link.connections] == [False, True]
+        assert link.brokerIndex == 1
         link.stop()
     finally:
         os.environ["SYNTH_BROKERS"] = previous
         running[0] = False
         listener.close()
-
-
-def test_friendsMeetEvenIfOneCannotReachTheFirstServer(localBroker, secondBroker):
-    from tests.broker import freePort
-    previous = os.environ["SYNTH_BROKERS"]
-    code = makeCode()
-    try:
-        os.environ["SYNTH_BROKERS"] = f"127.0.0.1:{localBroker}:0,127.0.0.1:{secondBroker}:0"
-        alice = Link()
-        os.environ["SYNTH_BROKERS"] = f"127.0.0.1:{freePort()}:0,127.0.0.1:{secondBroker}:0"
-        bruno = Link()
-    finally:
-        os.environ["SYNTH_BROKERS"] = previous
-    aliceEvents, brunoEvents = [], []
-    alice.received.connect(lambda c, subtopic, payload: aliceEvents.append((subtopic, payload)))
-    bruno.received.connect(lambda c, subtopic, payload: brunoEvents.append((subtopic, payload)))
-    for link, name in ((alice, "alice"), (bruno, "bruno")):
-        link.watch(code, ["state", "msg", "presence/+"])
-        link.setWill(code, f"presence/{name}")
-        link.publish(code, f"presence/{name}", {"name": name}, retain=True)
-        link.start()
-    assert waitFor(lambda: ("presence/alice", {"name": "alice"}) in brunoEvents
-                   and ("presence/bruno", {"name": "bruno"}) in aliceEvents, 20)
-    alice.publish(code, "msg", {"type": "ciao"})
-    assert waitFor(lambda: ("msg", {"type": "ciao"}) in brunoEvents, 10)
-    pump(1)
-    assert aliceEvents.count(("presence/bruno", {"name": "bruno"})) == 1
-    assert ("presence/bruno", None) not in aliceEvents
-    bruno.publish(code, "msg", {"type": "uno"})
-    pump(1)
-    assert aliceEvents.count(("msg", {"type": "uno"})) == 1
-    alice.stop()
-    bruno.stop()
-
-
-def test_presenceSurvivesOneServerDropping(localBroker, secondBroker):
-    previous = os.environ["SYNTH_BROKERS"]
-    code = makeCode()
-    os.environ["SYNTH_BROKERS"] = f"127.0.0.1:{localBroker}:0,127.0.0.1:{secondBroker}:0"
-    try:
-        alice, bruno = Link(), Link()
-    finally:
-        os.environ["SYNTH_BROKERS"] = previous
-    events = []
-    alice.received.connect(lambda c, subtopic, payload: events.append((subtopic, payload)))
-    alice.watch(code, ["presence/+"])
-    bruno.watch(code, ["presence/+"])
-    bruno.setWill(code, "presence/bruno")
-    bruno.publish(code, "presence/bruno", {"name": "bruno"}, retain=True)
-    alice.start()
-    bruno.start()
-    assert waitFor(lambda: ("presence/bruno", {"name": "bruno"}) in events, 15)
-    assert waitFor(lambda: len([c for c in bruno.connections if c.connected]) == 2, 15)
-    bruno.connections[0].client._sock.close()
-    pump(3)
-    assert ("presence/bruno", None) not in events
-    alice.stop()
-    bruno.stop()
-
-
-def test_switchesToWebSocketPortWhenNormalPortIsBlocked(webSocketBroker):
-    from tests.broker import freePort
-    previous = os.environ.get("SYNTH_BROKERS", "")
-    code = makeCode()
-    try:
-        os.environ["SYNTH_BROKERS"] = f"127.0.0.1:{freePort()}:0|127.0.0.1:{webSocketBroker}:0:/mqtt"
-        blocked = Link()
-        os.environ["SYNTH_BROKERS"] = f"127.0.0.1:{webSocketBroker}:0:/mqtt"
-        friend = Link()
-    finally:
-        os.environ["SYNTH_BROKERS"] = previous
-    blocked.switchSeconds = 1
-    events = []
-    friend.received.connect(lambda c, subtopic, payload: events.append((subtopic, payload)))
-    friend.watch(code, ["msg", "presence/+"])
-    friend.start()
-    blocked.watch(code, ["msg", "presence/+"])
-    blocked.publish(code, "presence/me", {"name": "me"}, retain=True)
-    blocked.start()
-    assert waitFor(blocked.isConnected, 15)
-    assert "(web)" in blocked.brokerName()
-    assert waitFor(lambda: ("presence/me", {"name": "me"}) in events, 10)
-    blocked.stop()
-    friend.stop()
-
-
-def test_defaultServersHaveWebSocketFallback():
-    from app.session_link import DEFAULT_BROKERS
-    assert all(len(endpoints) >= 2 and any(path for *_, path in endpoints) for endpoints in DEFAULT_BROKERS)
-
-
-def test_silentServerNeverFreezesTheApp():
-    """A firewall that swallows the connection (no answer) used to freeze the whole UI while switching port."""
-    import socket
-    import threading
-    import time
-    from PySide6.QtWidgets import QApplication
-    silent = socket.socket()
-    silent.bind(("127.0.0.1", 0))
-    silent.listen(50)
-    port = silent.getsockname()[1]
-    held = []
-
-    def acceptForever():
-        while True:
-            try:
-                held.append(silent.accept())
-            except OSError:
-                return
-
-    threading.Thread(target=acceptForever, daemon=True).start()
-    previous = os.environ.get("SYNTH_BROKERS", "")
-    os.environ["SYNTH_BROKERS"] = f"127.0.0.1:{port}:1|127.0.0.1:{port}:1:/mqtt,127.0.0.1:{port}:1"
-    try:
-        link = Link()
-    finally:
-        os.environ["SYNTH_BROKERS"] = previous
-    link.switchSeconds = 1
-    link.watch(makeCode(), ["state"])
-    link.start()
-    worst = 0.0
-    last = time.monotonic()
-    deadline = last + 6
-    while time.monotonic() < deadline:
-        QApplication.processEvents()
-        now = time.monotonic()
-        worst = max(worst, now - last)
-        last = now
-        time.sleep(0.01)
-    started = time.monotonic()
-    link.stop()
-    stopTime = time.monotonic() - started
-    silent.close()
-    assert worst < 0.5, f"UI bloccata per {worst:.1f}s"
-    assert stopTime < 0.5, f"stop bloccato per {stopTime:.1f}s"

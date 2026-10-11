@@ -113,7 +113,7 @@ class Database:
         self.connection.commit()
         return cursor.lastrowid
 
-    def addStreamSong(self, target, title, artist="", album="", duration=0, cover=None, hidden=False, commit=True):
+    def addStreamSong(self, target, title, artist="", album="", duration=0, cover=None, hidden=False):
         path = STREAM_PREFIX + target
         existing = self.connection.execute("SELECT id FROM songs WHERE path=?", (path,)).fetchone()
         if existing:
@@ -126,8 +126,7 @@ class Database:
             "INSERT INTO songs (path, title, artist, album, duration, cover, source, url, addedAt, hidden) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (path, title, artist, album, duration, cover, "stream", url, time.time(), 1 if hidden else 0),
         )
-        if commit:
-            self.connection.commit()
+        self.connection.commit()
         return cursor.lastrowid
 
     def findSongByUrl(self, url):

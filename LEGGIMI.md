@@ -1,4 +1,6 @@
-# Synth Music v1.9.4
+# Synth Music v1.9.5
+
+> **1.9.5 = ritorno alla 1.8.1** (stesse funzioni e stesso codice della 1.8.1). Ha un numero più alto solo perché le app già aggiornate la scarichino da sole.
 
 ## Installare / aggiornare (tu)
 Doppio click su **`INSTALLA_E_AGGIORNA.bat`**. Fa tutto da solo:
@@ -57,37 +59,6 @@ Il motore YouTube (yt-dlp) si aggiorna da solo una volta al giorno: non serve ri
 - Impostazioni → **"Non scaricare: aggiungi le canzoni solo in streaming"**: il bottone Scarica diventa *Aggiungi* (vale anche per playlist YouTube e Spotify)
 - Le canzoni in streaming hanno "Streaming ·" sotto il titolo. Menu → *Scarica sul PC*; al contrario, su una canzone scaricata *Solo streaming (elimina il file)*
 - Taglia audio ed "Esporta con effetti" richiedono il file: scarica prima la canzone
-
-## Novità 1.9.4
-- Stanza → **Copia diagnostica**: copia lo stato dei server e il log, da incollare in chat se qualcosa non va
-- Il log ora tiene orario e storico (`%APPDATA%\SynthMusic\log.txt`) e segna perché un server non si collega
-
-## Novità 1.9.3 (fix stanze)
-- **Niente più lag**: se un server non rispondeva, l'app si bloccava fino a 30 secondi ogni volta che cambiava porta (era questo il lag e la "Connessione" infinita)
-- Entrare in una stanza con code lunghe è molto più leggero
-- Il pannello della stanza resta sullo schermo dell'app (prima con 2 monitor finiva sull'altro)
-- **Stanze divise risolte**: l'app ora si collega a **tutti e 3 i server insieme** (prima uno solo: se tu e il tuo amico finivate su server diversi, eravate in due stanze separate e vi vedevate "a intermittenza")
-- Se una rete blocca la porta normale, prova da sola la **porta web** (come un sito): niente più "Connessione in corso..." infinito. Il pallino mostra a quanti server sei connesso
-- **Silenzio con la barra che avanza**: se lo streaming fallisce, la canzone si ricarica da sola (link nuovo, poi download temporaneo) invece di far scorrere la barra a vuoto
-- Salto avanti su canzoni ancora in caricamento: aspetta l'audio e parte al punto giusto
-- **Copertine** delle canzoni degli amici (anche mp3 personali e import da Spotify)
-- Invio dei tuoi file: se un servizio di caricamento non va ne prova altri 2; l'avviso dice quale canzone
-
-## Novità 1.9.2
-- Copertine nitide sugli schermi con ridimensionamento (125%, 150%...): ora sono disegnate alla risoluzione reale
-- Tolta la dissolvenza tra le pagine; le card si illuminano con un bordo (niente più effetto che sfocava)
-- Fix stanza: le canzoni modificate (tagliate, slowed, con effetti) ora arrivano agli amici come file tuo, non più come la versione originale di YouTube
-- Se la canzone di un amico non arriva, ora compare un avviso invece del silenzio
-
-## Novità 1.9.1
-- **Importa playlist** da **Spotify, YouTube, YouTube Music e Apple Music**: Libreria → *Importa playlist*, oppure incolla il link nella ricerca. Funziona con playlist, album e singoli brani pubblici (i "Mi piace" di YouTube Music sono privati: mettili in una playlist)
-
-## Novità 1.9
-- **Nuovo logo**
-- **Crea il tuo tema** (Impostazioni → Aspetto): sfondo con **gradienti pronti**, **il tuo gradiente** (2–4 colori + direzione) o **la tua immagine / GIF animata**, con slider "Oscuramento" e anteprima dal vivo. Lo sfondo si applica subito, senza riavviare
-- **Abbina i colori allo sfondo**: accento e pannelli presi dal gradiente o dall'immagine
-- **I miei temi**: salva colori + sfondo con un nome e riapplicali quando vuoi
-- Il video di sfondo della canzone, quando c'è, resta sopra al tema; la GIF si ferma quando l'app è in secondo piano
 
 ## Novità 1.8.1
 - **Bass boost** (fino a +12 dB) nel popup velocità/effetti: si salva per canzone, vale per tutti in stanza ed entra in "Salva come nuova canzone"

@@ -1,5 +1,5 @@
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication, QIcon, QLinearGradient, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QLinearGradient, QPainter, QPainterPath, QPixmap
 
 from ..config import settings
 
@@ -155,107 +155,12 @@ QSplitter::handle {{ background: {SIDEBAR}; }}
 QStatusBar {{ background: {SIDEBAR}; color: {SUBTEXT}; }}
 """
 
-def _rgba(color, alpha):
-    color = QColor(color)
-    return f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha})"
-
-
-# Used whenever something is painted behind the UI (song video, gradient, image/GIF): panels become see-through
-AMBIENT_STYLESHEET = f"""
-QWidget#page, QStackedWidget#pages {{ background: {_rgba(BACKGROUND, 165)}; }}
-QFrame#sidebarBox, QFrame#rightPanel {{ background: {_rgba(PANEL, 170)}; }}
-QFrame#playerBar {{ background: {_rgba(SIDEBAR, 150)}; }}
-QSplitter::handle {{ background: transparent; }}
+AMBIENT_STYLESHEET = """
+QWidget#page, QStackedWidget#pages { background: rgba(18, 18, 18, 165); }
+QFrame#sidebarBox, QFrame#rightPanel { background: rgba(20, 20, 20, 170); }
+QFrame#playerBar { background: rgba(0, 0, 0, 150); }
+QSplitter::handle { background: transparent; }
 """
-
-# ---------- theme backgrounds (gradient / image / GIF behind the whole window) ----------
-GRADIENT_PRESETS = {
-    "Tramonto": ["#FF5F6D", "#FFC371"],
-    "Oceano": ["#2E3192", "#1BFFFF"],
-    "Aurora": ["#00C9A7", "#845EC2"],
-    "Notte": ["#0F2027", "#203A43", "#2C5364"],
-    "Vaporwave": ["#FF6AD5", "#C774E8", "#8795E8", "#94D0FF"],
-    "Fuoco": ["#F12711", "#F5AF19"],
-    "Lavanda": ["#7F7FD5", "#86A8E7", "#91EAE4"],
-    "Foresta": ["#134E5E", "#71B280"],
-    "Pesca": ["#ED4264", "#FFEDBC"],
-    "Galassia": ["#41295A", "#2F0743"],
-    "Menta": ["#11998E", "#38EF7D"],
-    "Carbone": ["#232526", "#414345"],
-}
-BACKGROUND_TYPES = ("none", "gradient", "image")
-DEFAULT_BACKGROUND = {"type": "none", "colors": ["#FF5F6D", "#FFC371"], "angle": 135, "path": "", "dim": 40}
-MAX_GRADIENT_COLORS = 4
-
-
-def normalizeBackground(value):
-    """A complete, valid background config from whatever is stored in the settings."""
-    value = value if isinstance(value, dict) else {}
-    result = dict(DEFAULT_BACKGROUND)
-    if value.get("type") in BACKGROUND_TYPES:
-        result["type"] = value["type"]
-    colors = [QColor(str(color)).name().upper() for color in (value.get("colors") or []) if QColor(str(color)).isValid()]
-    if len(colors) >= 2:
-        result["colors"] = colors[:MAX_GRADIENT_COLORS]
-    else:
-        result["colors"] = list(DEFAULT_BACKGROUND["colors"])
-    try:
-        result["angle"] = int(value.get("angle", result["angle"])) % 360
-    except (TypeError, ValueError):
-        pass
-    try:
-        result["dim"] = max(0, min(85, int(value.get("dim", result["dim"]))))
-    except (TypeError, ValueError):
-        pass
-    result["path"] = str(value.get("path") or "")
-    if result["type"] == "image" and not result["path"]:
-        result["type"] = "none"
-    return result
-
-
-def gradientFor(rect, colors, angle):
-    """Linear gradient across rect at the given angle (0 = left→right, 90 = top→bottom)."""
-    import math
-    rect = QRectF(rect)
-    center = rect.center()
-    radians = math.radians(angle)
-    dx, dy = math.cos(radians), math.sin(radians)
-    # half-length so the gradient spans the whole rect at any angle
-    half = (abs(rect.width() * dx) + abs(rect.height() * dy)) / 2
-    gradient = QLinearGradient(QPointF(center.x() - dx * half, center.y() - dy * half),
-                               QPointF(center.x() + dx * half, center.y() + dy * half))
-    colors = colors or DEFAULT_BACKGROUND["colors"]
-    for index, color in enumerate(colors):
-        gradient.setColorAt(index / max(1, len(colors) - 1), QColor(color))
-    return gradient
-
-
-def themeColorsFrom(colors):
-    """Accent + dark tinted panels that match a background (its gradient stops or an image's main colour)."""
-    colors = [QColor(str(color)) for color in colors or [] if QColor(str(color)).isValid()]
-    if not colors:
-        return {}
-    vivid = max(colors, key=lambda color: color.hsvSaturationF() * (0.4 + color.valueF()))
-    hue, saturation, value, _ = vivid.getHsvF()
-    accent = QColor.fromHsvF(max(0.0, hue), min(1.0, max(saturation, 0.45)), max(value, 0.85))
-    red = sum(color.red() for color in colors) // len(colors)
-    green = sum(color.green() for color in colors) // len(colors)
-    blue = sum(color.blue() for color in colors) // len(colors)
-    average = QColor(red, green, blue).name()
-    return {"accent": accent.name().upper(), "background": _mix(average, "#000000", 0.86),
-            "panel": _mix(average, "#000000", 0.80), "sidebar": _mix(average, "#000000", 0.93)}
-
-
-def gradientPixmap(colors, angle, width, height, radius=6):
-    pixmap = QPixmap(width, height)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, width, height), radius, radius)
-    painter.fillPath(path, gradientFor(QRectF(0, 0, width, height), colors, angle))
-    painter.end()
-    return pixmap
 
 ICON_CODES = {
     "play": ("", "▶"), "pause": ("", "⏸"), "prev": ("", "⏮"), "next": ("", "⏭"),
@@ -344,29 +249,18 @@ def placeholderCover(size, seed=0, glyph="music"):
     return pixmap
 
 
-def displayRatio():
-    """Screen scaling (e.g. 1.25 / 1.5 on Windows): images are drawn at the real pixel size so they stay sharp."""
-    application = QGuiApplication.instance()
-    screens = application.screens() if application else []
-    return max([screen.devicePixelRatio() for screen in screens] or [1.0])
-
-
 def roundedPixmap(pixmap, radius):
     if radius <= 0:
         return pixmap
-    ratio = pixmap.devicePixelRatio() or 1.0
-    source = QPixmap(pixmap)
-    source.setDevicePixelRatio(1.0)
-    result = QPixmap(source.size())
+    result = QPixmap(pixmap.size())
     result.fill(Qt.transparent)
     painter = QPainter(result)
     painter.setRenderHint(QPainter.Antialiasing)
     path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, source.width(), source.height()), radius * ratio, radius * ratio)
+    path.addRoundedRect(QRectF(0, 0, pixmap.width(), pixmap.height()), radius, radius)
     painter.setClipPath(path)
-    painter.drawPixmap(0, 0, source)
+    painter.drawPixmap(0, 0, pixmap)
     painter.end()
-    result.setDevicePixelRatio(ratio)
     return result
 
 
@@ -378,12 +272,9 @@ def coverPixmap(path, size, seed=0, radius=4, glyph="music"):
     if pixmap.isNull():
         pixmap = placeholderCover(size, seed, glyph)
     else:
-        ratio = displayRatio()
-        physical = max(1, round(size * ratio))
-        pixmap = pixmap.scaled(physical, physical, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-        if pixmap.width() != physical or pixmap.height() != physical:
-            pixmap = pixmap.copy((pixmap.width() - physical) // 2, (pixmap.height() - physical) // 2, physical, physical)
-        pixmap.setDevicePixelRatio(ratio)
+        pixmap = pixmap.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        if pixmap.width() != size or pixmap.height() != size:
+            pixmap = pixmap.copy((pixmap.width() - size) // 2, (pixmap.height() - size) // 2, size, size)
     pixmap = roundedPixmap(pixmap, radius)
     _pixmapCache[cacheKey] = pixmap
     return pixmap
@@ -396,18 +287,14 @@ def mosaicPixmap(paths, size, seed=0, radius=4):
     cacheKey = ("mosaic", tuple(paths), size, radius)
     if cacheKey in _pixmapCache:
         return _pixmapCache[cacheKey]
-    ratio = displayRatio()
-    physical = max(2, round(size * ratio))
-    half = physical // 2
-    pixmap = QPixmap(physical, physical)
+    half = size // 2
+    pixmap = QPixmap(size, size)
     pixmap.fill(QColor(ELEVATED))
     painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.SmoothPixmapTransform)
     for index, path in enumerate(paths):
-        tile = coverPixmap(path, size // 2, radius=0)
-        painter.drawPixmap(QRectF((index % 2) * half, (index // 2) * half, half, half).toRect(), tile)
+        tile = coverPixmap(path, half, radius=0)
+        painter.drawPixmap((index % 2) * half, (index // 2) * half, tile)
     painter.end()
-    pixmap.setDevicePixelRatio(ratio)
     pixmap = roundedPixmap(pixmap, radius)
     _pixmapCache[cacheKey] = pixmap
     return pixmap

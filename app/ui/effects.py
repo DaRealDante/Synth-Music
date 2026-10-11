@@ -4,7 +4,7 @@ import random
 from PySide6.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer,
                             QVariantAnimation)
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
-from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QLabel, QWidget
 
 from ..config import settings
 from . import theme
@@ -81,40 +81,51 @@ def bounce(button, baseSize=None):
 
 
 class HoverGlow(QObject):
-    """Cards light up with a soft accent border under the mouse (painted with styles, so images stay sharp)."""
+    """Cards light up with a soft accent glow under the mouse."""
 
     def __init__(self, widget, color=None):
         super().__init__(widget)
         self.widget = widget
         self.color = QColor(color or theme.ACCENT)
-        self.baseStyle = widget.styleSheet()
-        self.selector = f"QFrame#{widget.objectName()}" if widget.objectName() else "QFrame"
-        widget.setStyleSheet(self.baseStyle + f" {self.selector} {{ border: 1px solid transparent; }}")
-        self.animation = QVariantAnimation(self)
-        self.animation.setDuration(180)
-        self.animation.setEasingCurve(QEasingCurve.OutCubic)
-        self.animation.valueChanged.connect(self._apply)
+        self.effect = None
+        self.animation = None
         widget.installEventFilter(self)
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Enter and enabled("fxTransitions"):
-            self._animateTo(1.0)
-        elif event.type() == QEvent.Leave:
-            self._animateTo(0.0)
+            self._animateTo(26)
+        elif event.type() == QEvent.Leave and self.effect is not None:
+            self._animateTo(0)
         return False
 
-    def _animateTo(self, level):
-        current = self.animation.currentValue() if self.animation.state() == QVariantAnimation.Running else None
+    def _animateTo(self, radius):
+        if self.effect is None:
+            self.effect = QGraphicsDropShadowEffect(self.widget)
+            glow = QColor(self.color)
+            glow.setAlpha(110)
+            self.effect.setColor(glow)
+            self.effect.setOffset(0, 4)
+            self.effect.setBlurRadius(0)
+            self.widget.setGraphicsEffect(self.effect)
+        if self.animation is None or self.animation.targetObject() is not self.effect:
+            self.animation = QPropertyAnimation(self.effect, b"blurRadius", self.effect)
+            self.animation.setDuration(180)
+            self.animation.setEasingCurve(QEasingCurve.OutCubic)
+            self.animation.finished.connect(self._removeEffect)
         self.animation.stop()
-        self.animation.setStartValue(float(current if current is not None else (1.0 - level)))
-        self.animation.setEndValue(float(level))
+        self.animation.setStartValue(self.effect.blurRadius())
+        self.animation.setEndValue(radius)
         self.animation.start()
 
-    def _apply(self, level):
-        glow = QColor(self.color)
-        glow.setAlphaF(max(0.0, min(1.0, float(level))) * 0.85)
-        self.widget.setStyleSheet(self.baseStyle + f" {self.selector} {{ border: 1px solid rgba({glow.red()}, {glow.green()},"
-                                                   f" {glow.blue()}, {glow.alpha()}); }}")
+    def _removeEffect(self):
+        QTimer.singleShot(0, self._dropEffect)
+
+    def _dropEffect(self):
+        if self.effect is not None and self.effect.blurRadius() < 1 and \
+                (self.animation is None or self.animation.state() != QPropertyAnimation.Running):
+            self.animation = None
+            self.widget.setGraphicsEffect(None)
+            self.effect = None
 
 
 # ---------- cover colors ----------

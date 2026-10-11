@@ -2,14 +2,9 @@ import os
 import time
 
 from PySide6.QtCore import QObject, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QImage, QImageReader, QMovie, QPainter
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
 from PySide6.QtWidgets import QWidget
-
-
-def gradientFor(rect, colors, angle):
-    from .theme import gradientFor as themeGradient
-    return themeGradient(rect, colors, angle)
 
 
 def isRemote(path):
@@ -193,17 +188,13 @@ class FrameView(QWidget):
 
 
 class BackdropWidget(QWidget):
-    """Central widget of the main window: paints the video (or the theme background) behind the (transparent) UI."""
+    """Central widget of the main window: paints the video behind the (transparent) UI."""
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
         self.controller = controller
         self.active = False
         self.uiVisible = True
-        self.themeBackground = None
-        self.themeImage = None
-        self.movie = None
-        self.lastMovieFrame = 0.0
         self.setAttribute(Qt.WA_StyledBackground, False)
         self.setAutoFillBackground(False)
         controller.frameReady.connect(self._onFrame)
@@ -219,69 +210,6 @@ class BackdropWidget(QWidget):
         if self.active:
             self.update()
 
-    # ---------- theme background ----------
-    def setThemeBackground(self, config):
-        """config: a normalized theme background ({"type": "none" | "gradient" | "image", ...})."""
-        if self.movie is not None:
-            self.movie.stop()
-            self.movie.deleteLater()
-            self.movie = None
-        self.themeImage = None
-        self.themeBackground = config if config and config.get("type") in ("gradient", "image") else None
-        if self.themeBackground and self.themeBackground["type"] == "image":
-            path = self.themeBackground.get("path") or ""
-            if not os.path.isfile(path):
-                self.themeBackground = None
-            else:
-                reader = QImageReader(path)
-                if reader.supportsAnimation() and reader.imageCount() != 1:
-                    movie = QMovie(path, parent=self)
-                    movie.setCacheMode(QMovie.CacheAll)
-                    if movie.isValid():
-                        self.movie = movie
-                        movie.frameChanged.connect(self._onMovieFrame)
-                        movie.start()
-                if self.movie is None:
-                    image = QImage(path)
-                    if image.isNull():
-                        self.themeBackground = None
-                    else:
-                        self.themeImage = image
-        self.update()
-
-    def hasThemeBackground(self):
-        return self.themeBackground is not None
-
-    def setPaused(self, paused):
-        """Freezes an animated background (e.g. while the app is minimized or in the background)."""
-        if self.movie is not None:
-            self.movie.setPaused(paused)
-
-    def _onMovieFrame(self, frameNumber):
-        now = time.monotonic()
-        if self.active or now - self.lastMovieFrame < 1 / 20:
-            return
-        self.lastMovieFrame = now
-        self.themeImage = self.movie.currentImage()
-        self.update()
-
-    def paintThemeBackground(self, painter, rect):
-        config = self.themeBackground
-        if not config:
-            return False
-        if config["type"] == "gradient":
-            painter.fillRect(rect, gradientFor(rect, config["colors"], config["angle"]))
-        else:
-            image = self.themeImage if self.themeImage is not None else (self.movie.currentImage() if self.movie else None)
-            if image is None or image.isNull():
-                return False
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            drawCover(painter, rect, image)
-        dim = int(config.get("dim", 0))
-        if dim:
-            painter.fillRect(rect, QColor(0, 0, 0, round(255 * dim / 100)))
-        return True
-
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#000"))
@@ -290,6 +218,4 @@ class BackdropWidget(QWidget):
             drawCover(painter, self.rect(), self.controller.currentImage)
             if self.uiVisible:
                 painter.fillRect(self.rect(), QColor(0, 0, 0, 110))
-        else:
-            self.paintThemeBackground(painter, QRectF(self.rect()))
         painter.end()

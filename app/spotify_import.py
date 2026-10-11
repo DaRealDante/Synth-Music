@@ -54,7 +54,6 @@ def fetchSpotify(url):
         else:
             raise RuntimeError("Link non supportato: usa il link di una playlist, di un album o di un brano")
     info["tracks"] = [track for track in info["tracks"] if track["title"]]
-    info["source"] = "Spotify"
     info["coverPath"] = None
     if info.get("image"):
         try:
