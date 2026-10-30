@@ -41,6 +41,7 @@ def waitForPreviousInstance(name=None, timeoutSeconds=15):
 
 class InstanceServer(QObject):
     messageReceived = Signal(str)
+    capriRequest = Signal(str, object)  # (message, socket): voice-assistant command that expects a reply
 
     def __init__(self, name=None, parent=None):
         super().__init__(parent)
@@ -64,5 +65,20 @@ class InstanceServer(QObject):
 
     def _read(self, socket):
         data = bytes(socket.readAll()).decode("utf-8", "ignore").strip()
-        if data:
+        if not data:
+            return
+        if data.lower().startswith("capri:"):
+            self.capriRequest.emit(data, socket)
+        else:
             self.messageReceived.emit(data)
+
+    @staticmethod
+    def reply(socket, text):
+        """Answer a capri: request on its own connection, then hang up."""
+        try:
+            socket.write((text + "\n").encode("utf-8"))
+            socket.flush()
+            socket.waitForBytesWritten(1000)
+            socket.disconnectFromServer()
+        except RuntimeError:
+            pass  # the client already went away
