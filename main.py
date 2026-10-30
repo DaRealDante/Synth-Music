@@ -16,6 +16,7 @@ from app.updater import activateDownloadedEngine
 
 activateDownloadedEngine()
 
+from app.capri_bridge import CapriBridge
 from app.session_link import parseCode
 from app.single_instance import InstanceServer, sendToRunning, waitForPreviousInstance
 from app.ui import theme
@@ -52,6 +53,8 @@ def main():
     window = MainWindow()
     window.show()
     instanceServer.messageReceived.connect(lambda message: window.handleExternalMessage(message))
+    capriBridge = CapriBridge(window)
+    instanceServer.capriRequest.connect(lambda message, socket: instanceServer.reply(socket, capriBridge.handle(message)))
     if linkArgument:
         QTimer.singleShot(1200, lambda: window.handleCode(linkArgument))
     sys.exit(application.exec())

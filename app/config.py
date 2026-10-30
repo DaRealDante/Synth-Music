@@ -4,7 +4,7 @@ import shutil
 import sys
 
 APP_NAME = "Synth Music"
-VERSION = "1.9.5"
+VERSION = "1.9.6"
 DISCORD_CLIENT_ID = ""  # ID dell'applicazione "Synth Music" sul Discord Developer Portal
 UPDATE_REPO = "DaRealDante/Synth-Music"  # "utente/repository" su GitHub: lo compila da solo PUBBLICA_AGGIORNAMENTO.bat
 
